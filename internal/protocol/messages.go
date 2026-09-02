@@ -48,6 +48,7 @@ const (
 	CtlPong    = "pong"
 	CtlClose   = "close"
 	CtlGateway = "gateway" // bridge → phone: the gateway child changed state
+	CtlName    = "name"    // phone → bridge: human-readable device name (in Reason)
 )
 
 // CtlMessage carries liveness and lifecycle signals.
