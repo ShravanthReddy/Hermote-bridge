@@ -44,11 +44,12 @@ type HTTPResponse struct {
 
 // Ctl operations.
 const (
-	CtlPing    = "ping"
-	CtlPong    = "pong"
-	CtlClose   = "close"
-	CtlGateway = "gateway" // bridge → phone: the gateway child changed state
-	CtlName    = "name"    // phone → bridge: human-readable device name (in Reason)
+	CtlPing     = "ping"
+	CtlPong     = "pong"
+	CtlClose    = "close"
+	CtlGateway  = "gateway"  // bridge → phone: the gateway child changed state
+	CtlName     = "name"     // phone → bridge: human-readable device name (in Reason)
+	CtlAccepted = "accepted" // bridge → phone: admission granted (sent right after the handshake)
 )
 
 // CtlMessage carries liveness and lifecycle signals.

@@ -142,6 +142,11 @@ func (c *conn) run(ctx context.Context) {
 	log = log.With("device", short(c.deviceID))
 	log.Info("phone connected")
 	defer log.Info("phone disconnected")
+	// Tell the phone admission succeeded before the (possibly slow) gateway
+	// dial, so it can distinguish "paired" from "refused".
+	if err := c.sendJSON(ctx, protocol.CtlMessage{Ch: protocol.ChCtl, Op: protocol.CtlAccepted}); err != nil {
+		return
+	}
 
 	if err := c.tunnel(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Debug("tunnel ended", "err", err)
