@@ -283,13 +283,27 @@ type vecChunk struct {
 	Note      string `json:"note"`
 }
 
+// vectorsPath is the canonical copy inside this module (so the standalone
+// mirror repo tests itself). mirrorPath is the iOS client's copy, refreshed by
+// -update when this module lives inside the app repository.
 func vectorsPath(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "..", "..", "HermesKit", "Tests", "HermesKitTests", "Fixtures", "e2ee-vectors.json"))
+	p, err := filepath.Abs(filepath.Join("testdata", "e2ee-vectors.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func mirrorPath() (string, bool) {
+	p, err := filepath.Abs(filepath.Join("..", "..", "..", "HermesKit", "Tests", "HermesKitTests", "Fixtures", "e2ee-vectors.json"))
+	if err != nil {
+		return "", false
+	}
+	if _, err := os.Stat(filepath.Dir(p)); err != nil {
+		return "", false
+	}
+	return p, true
 }
 
 func TestGoldenVectors(t *testing.T) {
@@ -374,6 +388,12 @@ func TestGoldenVectors(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("wrote %s", path)
+		if mirror, ok := mirrorPath(); ok {
+			if err := os.WriteFile(mirror, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("wrote %s", mirror)
+		}
 		return
 	}
 	want, err := os.ReadFile(path)
