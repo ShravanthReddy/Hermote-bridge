@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +32,7 @@ const usage = `hermes-remote — connect the Hermes iPhone app to this Mac
 Usage:
   hermes-remote up [--transport direct|relay] [--relay wss://…] [--name "My Mac"]
                    Install (or update) the background bridge and show a pairing QR code.
+                   Asks which transport to use the first time; the choice sticks.
   hermes-remote pair            Show a new pairing QR code (5-minute validity).
   hermes-remote status          Show what is running and who is paired.
   hermes-remote devices         List paired phones.
@@ -43,7 +46,13 @@ Transports:
   direct  (recommended) the phone reaches this Mac over your Tailscale network;
           needs the Tailscale app on the phone, signed into the same account.
   relay   both sides connect to a relay; the relay only ever sees encrypted bytes.
+          Uses the hosted relay unless --relay names your own.
 `
+
+// hostedRelayURL is the relay run for the Hermes app (see docs/REMOTE-ACCESS.md §6).
+// Interim sslip.io name until a domain is chosen; pairings bake the URL in, so a
+// change means phones re-pair.
+const hostedRelayURL = "wss://129-213-134-110.sslip.io"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -142,12 +151,14 @@ func cmdUp(args []string) error {
 	cfg.Python = python
 	ok("Hermes Agent at %s", filepath.Dir(filepath.Dir(filepath.Dir(python))))
 
-	// Config from flags with sticky defaults.
+	// Config from flags with sticky defaults. The first `up` on a Mac asks which
+	// transport to use (when run in a terminal); after that the answer is stored.
 	if *transport != "" {
 		cfg.Transport = protocol.Transport(*transport)
 	}
 	if cfg.Transport == "" {
-		cfg.Transport = protocol.TransportDirect
+		_, tsErr := tailscale.Find()
+		cfg.Transport = chooseTransport(os.Stdin, os.Stdout, stdinIsTerminal(), tsErr == nil)
 	}
 	if cfg.Transport != protocol.TransportDirect && cfg.Transport != protocol.TransportRelay {
 		return fmt.Errorf("unknown transport %q", cfg.Transport)
@@ -155,8 +166,18 @@ func cmdUp(args []string) error {
 	if *relay != "" {
 		cfg.RelayURL = strings.TrimRight(*relay, "/")
 	}
-	if cfg.Transport == protocol.TransportRelay && cfg.RelayURL == "" {
-		return errors.New("--transport relay needs --relay wss://host")
+	switch cfg.Transport {
+	case protocol.TransportRelay:
+		if cfg.RelayURL == "" {
+			cfg.RelayURL = hostedRelayURL
+		}
+		if cfg.RelayURL == hostedRelayURL {
+			ok("Transport: hosted relay %s (pass --relay wss://… to use your own)", cfg.RelayURL)
+		} else {
+			ok("Transport: relay %s", cfg.RelayURL)
+		}
+	default:
+		ok("Transport: direct over Tailscale")
 	}
 	if *name != "" {
 		cfg.Name = *name
@@ -237,6 +258,57 @@ func cmdUp(args []string) error {
 		}
 	}
 	return showPair(ctx, client, cfg, *lightTerminal)
+}
+
+// stdinIsTerminal reports whether `up` can ask the user a question.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// chooseTransport asks how the phone should reach this Mac. Non-interactive runs
+// (piped stdin, scripts) get the direct transport, which is also the default
+// answer. Three unrecognised answers fall back to direct rather than loop.
+func chooseTransport(in io.Reader, out io.Writer, interactive, tailscaleInstalled bool) protocol.Transport {
+	if !interactive {
+		return protocol.TransportDirect
+	}
+	tsNote := ""
+	if !tailscaleInstalled {
+		tsNote = " Not installed yet; `up` walks you through it."
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  How should your phone reach this Mac?")
+	fmt.Fprintln(out, "    1) Tailscale (recommended) — a private network between your own devices. Needs the")
+	fmt.Fprintf(out, "       Tailscale app on the Mac and the phone, signed into the same account.%s\n", tsNote)
+	fmt.Fprintln(out, "    2) Hosted relay — works anywhere, nothing extra to install. The relay forwards")
+	fmt.Fprintln(out, "       encrypted bytes it cannot read; you can run your own with --relay.")
+	reader := bufio.NewReader(in)
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprint(out, "  Choose 1 or 2 [1]: ")
+		line, err := reader.ReadString('\n')
+		if t, ok := parseTransportChoice(line); ok {
+			fmt.Fprintln(out)
+			return t
+		}
+		if err != nil {
+			break
+		}
+		fmt.Fprintln(out, "  Please answer 1 or 2.")
+	}
+	fmt.Fprintln(out)
+	return protocol.TransportDirect
+}
+
+// parseTransportChoice maps an answer to a transport; empty means the default.
+func parseTransportChoice(answer string) (protocol.Transport, bool) {
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "1", "direct", "tailscale", "t":
+		return protocol.TransportDirect, true
+	case "2", "relay", "r":
+		return protocol.TransportRelay, true
+	}
+	return "", false
 }
 
 func waitForDaemon(ctx context.Context, c *control.Client, timeout time.Duration) (control.Status, error) {

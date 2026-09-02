@@ -15,8 +15,20 @@ hermes-remote up
 ```
 
 `up` installs a background service (launchd), starts a private copy of the Hermes gateway bound
-to loopback with a random token, exposes the bridge on your Tailscale network, and prints a QR
-code. Scan it with **Scan Setup Code** in the Hermes app on the phone. That's the whole setup.
+to loopback with a random token, asks how the phone should reach this Mac, and prints a QR code.
+Scan it with **Scan Setup Code** in the Hermes app on the phone. That's the whole setup.
+
+Two ways for the phone to reach the Mac; `up` asks once and remembers:
+
+| | Direct (recommended) | Hosted relay |
+|---|---|---|
+| Path | your own [Tailscale](https://tailscale.com) network, device to device | both sides dial `wss://` to a relay we run |
+| Needs | Tailscale app on the Mac and the phone, same account | nothing extra |
+| Who sees traffic | nobody; WireGuard tunnel plus end-to-end encryption | the relay forwards encrypted bytes it cannot read |
+| Switch later | `hermes-remote up --transport direct` | `hermes-remote up --transport relay [--relay wss://your-relay]` |
+
+Run your own relay with `hermes-relay` (`deploy/relay/`); the app repository's `docs/REMOTE-ACCESS.md`
+§6 documents what it can and cannot see.
 
 ## What it does
 
@@ -47,9 +59,9 @@ State: `~/.hermes/remote/` (identity, paired devices, config). Logs: `~/.hermes/
 ## Requirements
 
 - macOS (Linux: foreground/systemd support to follow) with [Hermes Agent](https://hermes-agent.nousresearch.com) installed.
-- [Tailscale](https://tailscale.com/download/mac), signed in, with MagicDNS and HTTPS certificates
-  enabled for your tailnet (`up` tells you if they aren't). The phone runs the Tailscale app on the
-  same account.
+- For the direct transport: [Tailscale](https://tailscale.com/download/mac), signed in, with
+  MagicDNS and HTTPS certificates enabled for your tailnet (`up` tells you if they aren't). The
+  phone runs the Tailscale app on the same account. The relay transport needs nothing else.
 
 ## Protocol
 
