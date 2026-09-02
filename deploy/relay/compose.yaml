@@ -1,0 +1,45 @@
+# Self-hosted hermes-relay behind Caddy (automatic TLS).
+#
+#   export RELAY_DOMAIN=relay.example.com
+#   docker compose -f deploy/relay/compose.yaml up -d
+#
+# Then on each Mac:  hermes-remote up --transport relay --relay wss://relay.example.com
+#
+# The relay keeps nothing on disk and sees only ciphertext; Caddy's data volume
+# holds the TLS certificates. Logs (stdout, JSON) carry timestamps, client IPs,
+# session-id prefixes and byte counts — rotate/retain per your privacy policy
+# (the hosted relay keeps 7 days).
+services:
+  relay:
+    image: ghcr.io/shravanthreddy/hermes-relay:latest
+    build:
+      context: ../..
+      dockerfile: deploy/relay/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      RELAY_LISTEN: ":8080"
+    healthcheck:
+      test: ["CMD", "/hermes-relay", "-version"]
+      interval: 60s
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "7" }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?set RELAY_DOMAIN}
+    command: >
+      caddy reverse-proxy --from ${RELAY_DOMAIN} --to relay:8080
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [relay]
+
+volumes:
+  caddy-data:
+  caddy-config:
