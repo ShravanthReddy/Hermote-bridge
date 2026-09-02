@@ -350,6 +350,9 @@ func cmdStatus() error {
 			}
 		}
 	}
+	if relayURL := st.Extra["relay"]; relayURL != "" && st.Extra["relay_attached"] == "true" {
+		ok("Attached to relay %s", relayURL)
+	}
 	for _, w := range st.Warnings {
 		warn("%s", w)
 	}
