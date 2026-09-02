@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shravanthreddy/hermes-ios/remote/internal/bridge"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/control"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/gateway"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/protocol"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/state"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/tailscale"
+	"github.com/ShravanthReddy/hermes-remote/internal/bridge"
+	"github.com/ShravanthReddy/hermes-remote/internal/control"
+	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
+	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/hermes-remote/internal/tailscale"
 )
 
 // daemon is the long-running process launchd keeps alive: gateway supervisor,

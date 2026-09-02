@@ -15,7 +15,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/shravanthreddy/hermes-ios/remote/internal/state"
+	"github.com/ShravanthReddy/hermes-remote/internal/state"
 )
 
 // Status is what `hermes-remote status` shows.

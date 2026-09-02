@@ -1,4 +1,4 @@
-module github.com/shravanthreddy/hermes-ios/remote
+module github.com/ShravanthReddy/hermes-remote
 
 go 1.27.1
 

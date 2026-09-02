@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shravanthreddy/hermes-ios/remote/internal/protocol"
+	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
 )
 
 // Dir resolves the state directory.

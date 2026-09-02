@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shravanthreddy/hermes-ios/remote/internal/control"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/gateway"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/launchd"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/protocol"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/qr"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/state"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/tailscale"
+	"github.com/ShravanthReddy/hermes-remote/internal/control"
+	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
+	"github.com/ShravanthReddy/hermes-remote/internal/launchd"
+	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/hermes-remote/internal/qr"
+	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/hermes-remote/internal/tailscale"
 )
 
 // version is set by the release build (-ldflags "-X main.version=…").

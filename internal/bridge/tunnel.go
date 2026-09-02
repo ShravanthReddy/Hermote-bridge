@@ -15,8 +15,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/shravanthreddy/hermes-ios/remote/internal/gateway"
-	"github.com/shravanthreddy/hermes-ios/remote/internal/protocol"
+	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
+	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
 )
 
 // tunnel forwards frames between the phone and this connection's own gateway
