@@ -194,7 +194,10 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	venv := filepath.Dir(filepath.Dir(s.opts.Python))
 	cmd.Env = append(os.Environ(),
 		"HERMES_HOME="+s.opts.HermesHome,
-		"HERMES_DASHBOARD_PUBLIC_URL=", // loopback ungated (spike S10)
+		// A *loopback* public URL keeps the child ungated even when config.yaml
+		// declares a tailnet dashboard.public_url (an empty value would be
+		// treated as unset and fall back to config.yaml — spike S10).
+		"HERMES_DASHBOARD_PUBLIC_URL=http://127.0.0.1",
 		"HERMES_DASHBOARD_SESSION_TOKEN="+s.token,
 		"VIRTUAL_ENV="+venv,
 		"PATH="+filepath.Join(venv, "bin")+":"+os.Getenv("PATH"),
@@ -267,20 +270,25 @@ func (s *Supervisor) pump(r io.Reader, stream string, portCh chan<- int) {
 	}
 }
 
-// probe confirms the child answers and is ungated.
+// probe confirms the child answers, is ungated, and honours our token.
+// /api/status is public, so a token-protected route is what proves it.
 func (s *Supervisor) probe(ctx context.Context, port int) error {
 	client := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/api/status", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/api/sessions?limit=1", nil)
 	req.Header.Set("X-Hermes-Session-Token", s.token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("gateway child is gated or ignores the session token (HTTP %d)", resp.StatusCode)
+	default:
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return nil
 }
 
 // FindPython locates the Hermes venv interpreter: $HERMES_HOME/hermes-agent/venv,

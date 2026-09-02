@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Label is the LaunchAgent label.
@@ -79,17 +80,37 @@ func Install(ctx context.Context, s Spec) error {
 	if err := os.MkdirAll(s.LogDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(p, []byte(plist(s)), 0o644); err != nil {
+	content := []byte(plist(s))
+	if existing, err := os.ReadFile(p); err == nil && string(existing) == string(content) && Loaded(ctx) {
+		// Same definition already loaded: a restart is enough (and avoids the
+		// bootout/bootstrap race below).
+		return Restart(ctx)
+	}
+	if err := os.WriteFile(p, content, 0o644); err != nil {
 		return err
 	}
-	_ = exec.CommandContext(ctx, "launchctl", "bootout", domain()+"/"+Label).Run()
-	if out, err := exec.CommandContext(ctx, "launchctl", "bootstrap", domain(), p).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %s", strings.TrimSpace(string(out)))
+	if Loaded(ctx) {
+		_ = exec.CommandContext(ctx, "launchctl", "bootout", domain()+"/"+Label).Run()
+		// launchd tears the job down asynchronously; bootstrapping too early
+		// fails with "Bootstrap failed: 5: Input/output error".
+		for i := 0; i < 50 && Loaded(ctx); i++ {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
-	if out, err := exec.CommandContext(ctx, "launchctl", "kickstart", "-k", domain()+"/"+Label).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl kickstart: %s", strings.TrimSpace(string(out)))
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		out, err := exec.CommandContext(ctx, "launchctl", "bootstrap", domain(), p).CombinedOutput()
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		lastErr = fmt.Errorf("launchctl bootstrap: %s", strings.TrimSpace(string(out)))
+		time.Sleep(time.Second)
 	}
-	return nil
+	if lastErr != nil {
+		return lastErr
+	}
+	return Restart(ctx)
 }
 
 // Restart kickstarts the running agent.

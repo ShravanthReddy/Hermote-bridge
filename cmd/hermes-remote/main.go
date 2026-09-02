@@ -35,6 +35,7 @@ Usage:
   hermes-remote devices         List paired phones.
   hermes-remote devices revoke <id-prefix>
   hermes-remote restart | stop | logs
+  hermes-remote selftest        Pair a throw-away test client over loopback and exercise the tunnel.
   hermes-remote uninstall       Stop and remove the background bridge (keeps pairing state).
   hermes-remote version
 
@@ -72,6 +73,8 @@ func run(args []string) error {
 		return cmdLogs()
 	case "uninstall":
 		return cmdUninstall()
+	case "selftest":
+		return cmdSelftest()
 	case "daemon":
 		return runDaemon(args[1:])
 	case "version", "--version", "-v":
