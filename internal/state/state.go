@@ -41,11 +41,12 @@ func HermesHome() (string, error) {
 
 // Config is the operator's configuration (config.json).
 type Config struct {
-	Transport protocol.Transport `json:"transport"`
-	RelayURL  string             `json:"relay_url,omitempty"`
-	HTTPSPort int                `json:"https_port"` // tailscale serve port (direct)
-	Name      string             `json:"name"`       // shown on the phone after pairing
-	Python    string             `json:"python"`     // Hermes venv interpreter
+	Transport  protocol.Transport `json:"transport"`
+	RelayURL   string             `json:"relay_url,omitempty"`
+	HTTPSPort  int                `json:"https_port"`  // tailscale serve port (direct)
+	BridgePort int                `json:"bridge_port"` // loopback listener the bridge binds
+	Name       string             `json:"name"`        // shown on the phone after pairing
+	Python     string             `json:"python"`      // Hermes venv interpreter
 }
 
 // Device is a trusted phone.
