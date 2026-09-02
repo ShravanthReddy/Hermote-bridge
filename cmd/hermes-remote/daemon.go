@@ -30,6 +30,7 @@ type daemon struct {
 	cfg       state.Config
 	sup       *gateway.Supervisor
 	srv       *bridge.Server
+	relay     *bridge.RelayDialer // relay transport only
 	log       *slog.Logger
 	startedAt time.Time
 
@@ -86,6 +87,12 @@ func runDaemon(args []string) error {
 			stop()
 		}
 	}()
+
+	if cfg.Transport == protocol.TransportRelay {
+		d.relay = &bridge.RelayDialer{Server: d.srv, RelayURL: cfg.RelayURL, Logger: log}
+		wg.Add(1)
+		go func() { defer wg.Done(); d.relay.Run(ctx) }()
+	}
 
 	wg.Add(1)
 	go func() {
@@ -162,6 +169,17 @@ func (d *daemon) Status(ctx context.Context) control.Status {
 		s.PublicURL = u
 	} else {
 		s.Warnings = append(s.Warnings, err.Error())
+	}
+	if d.relay != nil {
+		attached, lastErr := d.relay.Attached()
+		s.Extra = map[string]string{"relay": d.cfg.RelayURL, "relay_attached": fmt.Sprint(attached)}
+		if !attached {
+			msg := "not attached to the relay"
+			if lastErr != "" {
+				msg += ": " + lastErr
+			}
+			s.Warnings = append(s.Warnings, msg)
+		}
 	}
 	return s
 }

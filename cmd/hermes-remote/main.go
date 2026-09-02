@@ -156,7 +156,7 @@ func cmdUp(args []string) error {
 		cfg.RelayURL = strings.TrimRight(*relay, "/")
 	}
 	if cfg.Transport == protocol.TransportRelay && cfg.RelayURL == "" {
-		return errors.New("--transport relay needs --relay wss://host (relay mode ships in a later release)")
+		return errors.New("--transport relay needs --relay wss://host")
 	}
 	if *name != "" {
 		cfg.Name = *name

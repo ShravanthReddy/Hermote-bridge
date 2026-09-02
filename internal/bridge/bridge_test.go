@@ -108,7 +108,14 @@ type phoneClient struct {
 
 func connectPhone(t *testing.T, ctx context.Context, hs *httptest.Server, bridgeID *protocol.Identity, phone *protocol.Identity, code []byte) (*phoneClient, error) {
 	t.Helper()
-	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hs.URL, "http")+"/v1/bridge", nil)
+	return connectPhoneURL(t, ctx, "ws"+strings.TrimPrefix(hs.URL, "http")+"/v1/bridge", bridgeID, phone, code)
+}
+
+// connectPhoneURL dials any bridge endpoint — direct (/v1/bridge) or a relay's
+// /v1/phone?s=… — and runs the phone side of the handshake.
+func connectPhoneURL(t *testing.T, ctx context.Context, url string, bridgeID *protocol.Identity, phone *protocol.Identity, code []byte) (*phoneClient, error) {
+	t.Helper()
+	ws, _, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

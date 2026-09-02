@@ -100,10 +100,24 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(maxFrame)
-	c := &conn{srv: s, ws: ws, remote: r.RemoteAddr}
+	s.serveLink(r.Context(), ws, r.RemoteAddr)
+}
+
+// phoneLink is one phone's message stream: a WebSocket in direct mode, or a
+// channel demultiplexed from the relay connection. *websocket.Conn satisfies
+// it as-is.
+type phoneLink interface {
+	Read(ctx context.Context) (websocket.MessageType, []byte, error)
+	Write(ctx context.Context, typ websocket.MessageType, p []byte) error
+	Close(code websocket.StatusCode, reason string) error
+}
+
+// serveLink runs the handshake and tunnel for one phone until it disconnects.
+func (s *Server) serveLink(ctx context.Context, link phoneLink, remote string) {
+	c := &conn{srv: s, ws: link, remote: remote}
 	s.track(c, true)
 	defer s.track(c, false)
-	c.run(r.Context())
+	c.run(ctx)
 }
 
 func (s *Server) track(c *conn, add bool) {
@@ -120,7 +134,7 @@ func (s *Server) track(c *conn, add bool) {
 
 type conn struct {
 	srv      *Server
-	ws       *websocket.Conn
+	ws       phoneLink
 	remote   string
 	suite    *protocol.Suite
 	deviceID string
