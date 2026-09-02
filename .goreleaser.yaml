@@ -72,6 +72,7 @@ release:
 
 brews:
   - name: hermes-remote
+    ids: [default] # the CLI archives only; relay archives are Linux-only server builds
     repository:
       owner: "{{ .Env.GITHUB_OWNER }}"
       name: homebrew-hermes
