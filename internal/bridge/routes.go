@@ -115,6 +115,8 @@ var allowedRoutes = []route{
 	{http.MethodGet, "/api/messaging/"},
 	{http.MethodPut, "/api/messaging/"},
 	{http.MethodPost, "/api/messaging/"},
+	// Cancelling a Telegram / WhatsApp guided setup.
+	{http.MethodDelete, "/api/messaging/"},
 	{http.MethodGet, "/api/pairing"},
 	{http.MethodPost, "/api/pairing/"},
 	{http.MethodGet, "/api/webhooks"},

@@ -24,6 +24,8 @@ func TestRouteAllowed(t *testing.T) {
 		{"skill edit is a PUT", http.MethodPut, "/api/skills/content", true},
 		{"spawned action tail", http.MethodGet, "/api/actions/doctor/status", true},
 		{"backup download", http.MethodGet, "/api/ops/backup/download", true},
+		{"onboarding cancel is a DELETE", http.MethodDelete, "/api/messaging/whatsapp/onboarding/p1", true},
+		{"webhook delete", http.MethodDelete, "/api/webhooks/deploys", true},
 		{"memory provider form is writable", http.MethodPut, "/api/memory/providers/honcho/config", true},
 		{"memory provider setup is a POST", http.MethodPost, "/api/memory/providers/honcho/setup", true},
 		{"memory files are not writable", http.MethodPut, "/api/memory", false},
