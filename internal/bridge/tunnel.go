@@ -170,37 +170,14 @@ func (c *conn) dispatch(ctx context.Context, gw *websocket.Conn, plain []byte) e
 	return protocol.ErrUnknownChannel
 }
 
-// allowedPaths is the REST surface HermesKit uses (docs/REMOTE-ACCESS.md §7).
-// Anything else is refused: the bridge is not a general proxy to the gateway.
-var allowedPaths = []struct {
-	method string
-	prefix string
-}{
-	{http.MethodGet, "/api/status"},
-	{http.MethodGet, "/api/media"},
-	{http.MethodGet, "/api/sessions"},
-	{http.MethodGet, "/api/sessions/search"},
-	{http.MethodPatch, "/api/sessions/"},
-	{http.MethodDelete, "/api/profiles/"},
-}
-
-func pathAllowed(method, path string) bool {
-	for _, a := range allowedPaths {
-		if a.method == method && (path == strings.TrimSuffix(a.prefix, "/") || strings.HasPrefix(path, a.prefix)) {
-			return true
-		}
-	}
-	return false
-}
-
 // proxyHTTP performs one REST call against the loopback gateway with the
 // session token and returns the response on the http channel.
 func (c *conn) proxyHTTP(ctx context.Context, req protocol.HTTPRequest) {
 	reply := func(status int, body []byte) {
 		_ = c.sendJSON(ctx, protocol.HTTPResponse{Ch: protocol.ChHTTP, ID: req.ID, Status: status, Body: body})
 	}
-	if !pathAllowed(req.Method, req.Path) || strings.Contains(req.Path, "..") {
-		reply(http.StatusForbidden, []byte(`{"error":"path not allowed through the bridge"}`))
+	if !routeAllowed(req.Method, req.Path) {
+		reply(http.StatusForbidden, []byte(RefusedRouteError))
 		return
 	}
 	base, ok := c.srv.Gateway.BaseURL()

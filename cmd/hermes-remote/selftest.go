@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/ShravanthReddy/hermes-remote/internal/bridge"
 	"github.com/ShravanthReddy/hermes-remote/internal/control"
 	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
 	"github.com/ShravanthReddy/hermes-remote/internal/state"
@@ -170,6 +171,35 @@ func cmdSelftest() error {
 		return fmt.Errorf("REST /api/status returned %d: %s", resp.Status, resp.Body)
 	}
 	ok("REST /api/status → 200, Hermes %s, gateway gate off on loopback (auth_required=%v) as designed", status.Version, status.AuthRequired)
+
+	// The settings engine depends on the schema route being proxied; a route
+	// outside the allow-list must be refused with the body HermesKit matches.
+	if err := send(protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: 2, Method: "GET", Path: "/api/config/schema"}); err != nil {
+		return err
+	}
+	if plain, err = recv(protocol.ChHTTP, func([]byte) bool { return true }); err != nil {
+		return err
+	}
+	_ = json.Unmarshal(plain, &resp)
+	var schema struct {
+		Fields map[string]json.RawMessage `json:"fields"`
+	}
+	_ = json.Unmarshal(resp.Body, &schema)
+	if resp.Status != 200 || len(schema.Fields) == 0 {
+		return fmt.Errorf("REST /api/config/schema returned %d with %d fields", resp.Status, len(schema.Fields))
+	}
+	ok("REST /api/config/schema → 200, %d configurable keys", len(schema.Fields))
+	if err := send(protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: 3, Method: "GET", Path: "/api/not-allowed"}); err != nil {
+		return err
+	}
+	if plain, err = recv(protocol.ChHTTP, func([]byte) bool { return true }); err != nil {
+		return err
+	}
+	_ = json.Unmarshal(plain, &resp)
+	if resp.Status != 403 || string(resp.Body) != bridge.RefusedRouteError {
+		return fmt.Errorf("unlisted route answered %d %s; expected 403 %s", resp.Status, resp.Body, bridge.RefusedRouteError)
+	}
+	ok("REST outside the allow-list refused (403) with the body the app recognises")
 	if cfg.Transport == protocol.TransportDirect {
 		fmt.Printf("  Phones connect via %s (needs Tailscale on the phone).\n", payload.URL)
 	}
