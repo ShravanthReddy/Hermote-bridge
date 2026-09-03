@@ -31,8 +31,10 @@ var allowedRoutes = []route{
 	{http.MethodPost, "/api/hermes/update"},
 	{http.MethodGet, "/api/logs"},
 
-	// Sessions directory and media.
+	// Sessions directory and media. GET /api/sessions/<id>/messages reads a
+	// stored transcript without resuming it (export, the Artifacts index).
 	{http.MethodGet, "/api/sessions"},
+	{http.MethodGet, "/api/sessions/"},
 	{http.MethodGet, "/api/sessions/search"},
 	{http.MethodPatch, "/api/sessions/"},
 	{http.MethodDelete, "/api/sessions/"},
@@ -93,9 +95,14 @@ var allowedRoutes = []route{
 	{http.MethodPost, "/api/learning/"},
 	{http.MethodGet, "/api/curator"},
 	{http.MethodPost, "/api/curator/"},
+	{http.MethodPut, "/api/curator/"},
 
-	// Operations and analytics.
+	// Operations and analytics (plan 10 / WP4): spawned actions are tailed
+	// through /api/actions/<name>/status; a finished backup is fetched from
+	// /api/ops/backup/download.
 	{http.MethodPost, "/api/ops/"},
+	{http.MethodGet, "/api/ops/"},
+	{http.MethodGet, "/api/actions/"},
 	{http.MethodGet, "/api/analytics/"},
 
 	// Messaging platforms, pairing, webhooks, scheduled jobs.
