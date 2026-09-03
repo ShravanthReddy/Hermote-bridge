@@ -46,6 +46,9 @@ Run your own relay with `hermes-relay` (`deploy/relay/`); the app repository's `
   (`push setup`), the bridge watches sessions only while a paired phone is offline and pushes
   approvals, questions and finished turns — Approve / Deny straight from the banner. Tokens are
   registered by the app over the encrypted channel; nothing else is exposed.
+- **Terminals on the Mac.** The app's workspace can open your login shell through the tunnel
+  (the `pty` channel, v0.9): each phone connection owns at most eight, in the chat's folder, and
+  they end when the phone disconnects. Nothing listens on the network for it.
 
 ## Commands
 
