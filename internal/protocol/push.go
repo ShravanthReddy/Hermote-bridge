@@ -13,6 +13,8 @@ type PushRegistration struct {
 	Environment string `json:"environment"`
 	// Notification kinds the phone wants (push.Kind values). Empty = none.
 	Kinds []string `json:"kinds"`
+	// Sound file in the app's Library/Sounds for turn-done alerts; empty = default.
+	Sound string `json:"sound,omitempty"`
 }
 
 // Push environments.

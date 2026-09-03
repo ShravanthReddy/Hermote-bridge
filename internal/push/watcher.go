@@ -238,6 +238,9 @@ func (w *Watcher) deliver(ctx context.Context, offline []Entry, alert Alert) {
 		if !entry.Wants(alert.Kind) {
 			continue
 		}
+		if alert.Kind == KindTurnDone && entry.Sound != "" {
+			alert.Sound = entry.Sound // the phone's chosen completion chime
+		}
 		err := w.Sender.Send(ctx, entry.Token, entry.Environment, alert)
 		switch {
 		case err == nil:
