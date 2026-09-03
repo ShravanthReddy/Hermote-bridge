@@ -71,8 +71,10 @@ var allowedRoutes = []route{
 
 	// Capabilities: skills, tools, MCP.
 	{http.MethodGet, "/api/skills"},
+	{http.MethodPost, "/api/skills"},
 	{http.MethodPost, "/api/skills/"},
 	{http.MethodGet, "/api/skills/"},
+	{http.MethodPut, "/api/skills/"},
 	{http.MethodGet, "/api/tools/"},
 	{http.MethodPut, "/api/tools/"},
 	{http.MethodPost, "/api/tools/"},

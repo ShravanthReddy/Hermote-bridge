@@ -20,6 +20,8 @@ func TestRouteAllowed(t *testing.T) {
 		{"nested workspace route", http.MethodPost, "/api/git/review/stage", true},
 		{"curator pause is a PUT", http.MethodPut, "/api/curator/paused", true},
 		{"stored transcript is readable", http.MethodGet, "/api/sessions/20260901_abc/messages", true},
+		{"skill toggle is a PUT", http.MethodPut, "/api/skills/toggle", true},
+		{"skill edit is a PUT", http.MethodPut, "/api/skills/content", true},
 		{"spawned action tail", http.MethodGet, "/api/actions/doctor/status", true},
 		{"backup download", http.MethodGet, "/api/ops/backup/download", true},
 		{"method matters", http.MethodDelete, "/api/status", false},
