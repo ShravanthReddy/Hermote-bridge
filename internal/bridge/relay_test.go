@@ -138,3 +138,20 @@ func TestRelayTransportEndToEnd(t *testing.T) {
 		t.Fatalf("reconnect after relay drop failed: %v", err)
 	}
 }
+
+func TestRelayKeepaliveFrameIsAnIgnorableControlMessage(t *testing.T) {
+	ch, kind, payload, err := protocol.ParseRelayFrame(relayKeepaliveFrame())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch != protocol.RelayControlChannel || kind != protocol.RelayKindText {
+		t.Fatalf("keepalive must ride the control channel as text, got ch=%d kind=%d", ch, kind)
+	}
+	var c protocol.RelayControl
+	if err := json.Unmarshal(payload, &c); err != nil || c.T != "ping" {
+		t.Fatalf("keepalive payload = %q (%v)", payload, err)
+	}
+	if relayKeepalive*3 >= idleTimeout {
+		t.Fatalf("keepalive %v must fire at least three times per relay idle timeout %v", relayKeepalive, idleTimeout)
+	}
+}

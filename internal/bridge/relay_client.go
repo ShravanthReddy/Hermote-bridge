@@ -124,11 +124,13 @@ func (d *RelayDialer) runOnce(ctx context.Context) error {
 		ws.Close(websocket.StatusGoingAway, "")
 		mux.closeAll()
 	}()
+	go d.keepalive(ctx, cancel, ws, mux)
 
 	for {
-		rctx, rcancel := context.WithTimeout(ctx, idleTimeout+30*time.Second)
-		typ, frame, err := ws.Read(rctx)
-		rcancel()
+		// No read deadline here: the keepalive's failing ping is what ends a
+		// dead attachment. With a deadline, an idle relay (which sends nothing
+		// on its own) was treated as gone every idleTimeout.
+		typ, frame, err := ws.Read(ctx)
 		if err != nil {
 			return err
 		}
@@ -154,6 +156,44 @@ func (d *RelayDialer) runOnce(ctx context.Context) error {
 			continue
 		}
 		mux.deliver(ch, kind, payload)
+	}
+}
+
+// relayKeepalive is well inside the relay's idle timeout (100s): the relay
+// closes a bridge that sends nothing for that long, and an idle bridge sent
+// nothing — the attachment dropped every 101s all day (2026-09-03), taking
+// every phone tunnel with it.
+const relayKeepalive = 30 * time.Second
+
+// relayKeepaliveFrame is a control message the relay reads and ignores; the
+// read alone resets its idle timer.
+func relayKeepaliveFrame() []byte {
+	payload, _ := json.Marshal(protocol.RelayControl{T: "ping"})
+	return protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, payload)
+}
+
+// keepalive feeds the relay's idle timer and checks the socket is alive: a
+// WebSocket ping with no pong ends this attachment so Run redials.
+func (d *RelayDialer) keepalive(ctx context.Context, end context.CancelFunc, ws *websocket.Conn, mux *relayMux) {
+	ticker := time.NewTicker(relayKeepalive)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
+		err := mux.write(pctx, relayKeepaliveFrame())
+		if err == nil {
+			err = ws.Ping(pctx)
+		}
+		pcancel()
+		if err != nil {
+			d.Logger.Warn("relay keepalive failed", "err", err)
+			end()
+			return
+		}
 	}
 }
 
