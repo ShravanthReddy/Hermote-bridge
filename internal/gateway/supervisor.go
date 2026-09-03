@@ -40,6 +40,13 @@ type Options struct {
 	Logger     *slog.Logger
 	// StartTimeout bounds the wait for the readiness sentinel (default 90 s).
 	StartTimeout time.Duration
+	// ProbeInterval is how often a ready child is asked whether it still
+	// answers (default 15 s); ProbeFailures consecutive misses (default 3)
+	// end it so the restart loop brings a fresh one up. A gateway whose event
+	// loop has stalled stays alive as a process while every dial times out —
+	// exit alone would never catch it (incident 2026-09-03).
+	ProbeInterval time.Duration
+	ProbeFailures int
 }
 
 // Supervisor runs and restarts the gateway child.
@@ -55,6 +62,9 @@ type Supervisor struct {
 	stop chan struct{}
 	done chan struct{}
 	cmd  *exec.Cmd
+
+	// probeFn answers "does the child on this port still serve us"; tests swap it.
+	probeFn func(ctx context.Context, port int) error
 }
 
 var readyRe = regexp.MustCompile(`HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)`)
@@ -70,17 +80,25 @@ func New(opts Options) (*Supervisor, error) {
 	if opts.StartTimeout == 0 {
 		opts.StartTimeout = 90 * time.Second
 	}
+	if opts.ProbeInterval == 0 {
+		opts.ProbeInterval = 15 * time.Second
+	}
+	if opts.ProbeFailures == 0 {
+		opts.ProbeFailures = 3
+	}
 	tok := make([]byte, 32)
 	if _, err := rand.Read(tok); err != nil {
 		return nil, err
 	}
-	return &Supervisor{
+	s := &Supervisor{
 		opts:  opts,
 		token: hex.EncodeToString(tok),
 		state: StateDown,
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
-	}, nil
+	}
+	s.probeFn = s.probe
+	return s, nil
 }
 
 // Token is the session token the child accepts (header, Bearer or ?token=).
@@ -235,6 +253,16 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 		}
 		s.setState(StateReady, port)
 		s.opts.Logger.Info("gateway ready", "port", port)
+		exited := make(chan struct{})
+		go func() {
+			if s.watch(ctx, port, exited) {
+				s.opts.Logger.Warn("gateway child unresponsive; ending it", "port", port)
+				_ = cmd.Process.Kill()
+			}
+		}()
+		err := <-waitErr
+		close(exited)
+		return err
 	case err := <-waitErr:
 		return fmt.Errorf("gateway: exited before ready: %w", err)
 	case <-time.After(s.opts.StartTimeout):
@@ -245,7 +273,37 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 		_ = cmd.Process.Signal(os.Interrupt)
 		return <-waitErr
 	}
-	return <-waitErr
+}
+
+// watch probes the ready child until it exits, the context ends, or the
+// probe has failed ProbeFailures times in a row; true means "kill it".
+func (s *Supervisor) watch(ctx context.Context, port int, exited <-chan struct{}) bool {
+	ticker := time.NewTicker(s.opts.ProbeInterval)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-exited:
+			return false
+		case <-ctx.Done():
+			return false
+		case <-s.stop:
+			return false
+		case <-ticker.C:
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, s.opts.ProbeInterval)
+		err := s.probeFn(probeCtx, port)
+		cancel()
+		if err == nil {
+			failures = 0
+			continue
+		}
+		failures++
+		s.opts.Logger.Warn("gateway probe failed", "err", err, "consecutive", failures)
+		if failures >= s.opts.ProbeFailures {
+			return true
+		}
+	}
 }
 
 func (s *Supervisor) pump(r io.Reader, stream string, portCh chan<- int) {
