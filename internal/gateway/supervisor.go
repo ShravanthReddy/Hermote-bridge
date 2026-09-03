@@ -46,6 +46,8 @@ type Options struct {
 	// loop has stalled stays alive as a process while every dial times out —
 	// exit alone would never catch it (incident 2026-09-03).
 	ProbeInterval time.Duration
+	// StopGrace is how long Stop waits after SIGINT before SIGKILL (default 5s).
+	StopGrace     time.Duration
 	ProbeFailures int
 }
 
@@ -79,6 +81,9 @@ func New(opts Options) (*Supervisor, error) {
 	}
 	if opts.StartTimeout == 0 {
 		opts.StartTimeout = 90 * time.Second
+	}
+	if opts.StopGrace == 0 {
+		opts.StopGrace = 5 * time.Second
 	}
 	if opts.ProbeInterval == 0 {
 		opts.ProbeInterval = 15 * time.Second
@@ -132,6 +137,20 @@ func (s *Supervisor) Watch() <-chan State {
 	s.watchers = append(s.watchers, ch)
 	s.mu.Unlock()
 	return ch
+}
+
+// Unwatch drops a channel handed out by Watch. A connection that ends without
+// it leaks its slot — and a send attempt per state change — for the daemon's
+// lifetime.
+func (s *Supervisor) Unwatch(ch <-chan State) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, w := range s.watchers {
+		if w == ch {
+			s.watchers = append(s.watchers[:i], s.watchers[i+1:]...)
+			return
+		}
+	}
 }
 
 func (s *Supervisor) setState(st State, port int) {
@@ -192,7 +211,16 @@ func (s *Supervisor) Stop() {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Signal(os.Interrupt)
 	}
-	<-s.done
+	// A child that ignores SIGINT (a wedged interpreter) would otherwise hang
+	// `hermes-remote stop` and launchd's unload forever.
+	select {
+	case <-s.done:
+	case <-time.After(s.opts.StopGrace):
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-s.done
+	}
 }
 
 func (s *Supervisor) stopped() bool {

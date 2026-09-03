@@ -70,3 +70,40 @@ func TestWatchStopsWithTheChild(t *testing.T) {
 		t.Fatal("an exited child needs no kill")
 	}
 }
+
+func TestUnwatchDropsTheWatcher(t *testing.T) {
+	s := newTestSupervisor(t)
+	kept := s.Watch()
+	dropped := s.Watch()
+	s.Unwatch(dropped)
+	s.setState(StateReady, 1234)
+	select {
+	case st := <-kept:
+		if st != StateReady {
+			t.Fatalf("kept watcher saw %q", st)
+		}
+	default:
+		t.Fatal("kept watcher received nothing")
+	}
+	select {
+	case st := <-dropped:
+		t.Fatalf("dropped watcher still received %q", st)
+	default:
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.watchers) != 1 {
+		t.Fatalf("expected 1 registered watcher, got %d", len(s.watchers))
+	}
+}
+
+func TestUnwatchIgnoresAnUnknownChannel(t *testing.T) {
+	s := newTestSupervisor(t)
+	_ = s.Watch()
+	s.Unwatch(make(chan State))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.watchers) != 1 {
+		t.Fatalf("expected the registered watcher to survive, got %d", len(s.watchers))
+	}
+}

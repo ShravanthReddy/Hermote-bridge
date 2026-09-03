@@ -77,6 +77,7 @@ func (c *conn) tunnel(ctx context.Context) error {
 		ticker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
 		states := c.srv.Gateway.Watch()
+		defer c.srv.Gateway.Unwatch(states)
 		for {
 			select {
 			case <-ctx.Done():
