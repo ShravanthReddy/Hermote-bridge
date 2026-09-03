@@ -162,6 +162,11 @@ func (c *conn) dispatch(ctx context.Context, gw *websocket.Conn, plain []byte) e
 			return errors.New("phone closed: " + m.Reason)
 		case protocol.CtlName:
 			return c.srv.Store.Trust(mustDecodeID(c.deviceID), m.Reason)
+		case protocol.CtlPush:
+			if m.Push != nil && c.srv.OnPush != nil {
+				c.srv.OnPush(c.deviceID, *m.Push)
+			}
+			return nil
 		}
 		return nil
 	case protocol.ChConfirm:

@@ -58,6 +58,8 @@ type CtlMessage struct {
 	Op     string `json:"op"`
 	Reason string `json:"reason,omitempty"`
 	State  string `json:"state,omitempty"` // for CtlGateway: "starting" | "ready" | "down"
+	// For CtlPush: how to reach the phone while it is disconnected.
+	Push *PushRegistration `json:"push,omitempty"`
 }
 
 // Chunk is one piece of a message larger than ChunkThreshold. Pieces are

@@ -36,6 +36,9 @@ type Server struct {
 	Logger     *slog.Logger
 	Pairings   *pairings
 	httpClient *http.Client
+	// OnPush receives a phone's push registration (device token, wanted
+	// kinds); nil when push is not wired.
+	OnPush func(deviceID string, reg protocol.PushRegistration)
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -77,6 +80,20 @@ func (s *Server) ConnectionCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+// OnlineDevices lists the device ids with a live connection; they see events
+// as they happen and need no push.
+func (s *Server) OnlineDevices() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []string
+	for c := range s.conns {
+		if c.deviceID != "" {
+			ids = append(ids, c.deviceID)
+		}
+	}
+	return ids
 }
 
 // DisconnectDevice closes every connection from a revoked phone.

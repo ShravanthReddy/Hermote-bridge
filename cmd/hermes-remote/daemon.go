@@ -18,6 +18,7 @@ import (
 	"github.com/ShravanthReddy/hermes-remote/internal/control"
 	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
 	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/hermes-remote/internal/push"
 	"github.com/ShravanthReddy/hermes-remote/internal/state"
 	"github.com/ShravanthReddy/hermes-remote/internal/tailscale"
 )
@@ -94,6 +95,12 @@ func runDaemon(args []string) error {
 		go func() { defer wg.Done(); d.relay.Run(ctx) }()
 	}
 
+	// Push: registrations are always recorded (a phone may register before
+	// the APNs key is set up); the watcher only runs once a key exists.
+	if err := d.startPush(ctx, &wg); err != nil {
+		log.Warn("push disabled", "err", err)
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -110,6 +117,42 @@ func runDaemon(args []string) error {
 	_ = httpSrv.Shutdown(shutdown)
 	sup.Stop()
 	wg.Wait()
+	return nil
+}
+
+// startPush records phone registrations and, when an APNs key is configured,
+// polls the gateway for moments that need a person and pushes them to phones
+// that are not connected (ADR-023).
+func (d *daemon) startPush(ctx context.Context, wg *sync.WaitGroup) error {
+	registry, err := push.OpenRegistry(d.store.Path(""))
+	if err != nil {
+		return err
+	}
+	d.srv.OnPush = func(deviceID string, reg protocol.PushRegistration) {
+		if err := registry.Set(deviceID, reg, time.Now().UTC()); err != nil {
+			d.log.Warn("push registration not saved", "err", err)
+			return
+		}
+		d.log.Info("push registration", "device", deviceID[:min(8, len(deviceID))], "kinds", len(reg.Kinds))
+	}
+	cfg, err := push.LoadConfig(d.store.Path(""))
+	if err != nil {
+		return err
+	}
+	client, err := push.NewClient(cfg)
+	if err != nil {
+		return err
+	}
+	watcher := &push.Watcher{
+		Gateway:  &push.WSGateway{BaseURL: d.sup.BaseURL, Token: d.sup.Token},
+		Sender:   client,
+		Registry: registry,
+		Online:   d.srv.OnlineDevices,
+		Logger:   d.log,
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); watcher.Run(ctx) }()
+	d.log.Info("push watcher running", "bundle", cfg.BundleID, "key", cfg.KeyID)
 	return nil
 }
 
