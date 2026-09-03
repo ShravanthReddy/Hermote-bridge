@@ -93,6 +93,10 @@ var allowedRoutes = []route{
 	{http.MethodGet, "/api/memory"},
 	{http.MethodPost, "/api/memory/"},
 	{http.MethodGet, "/api/memory/"},
+	// Memory providers (plan 10 / WP8): a provider's settings form is saved
+	// with PUT; POST runs its package install on the Mac.
+	{http.MethodPut, "/api/memory/providers/"},
+	{http.MethodPost, "/api/memory/providers/"},
 	{http.MethodGet, "/api/learning/"},
 	{http.MethodPost, "/api/learning/"},
 	{http.MethodGet, "/api/curator"},
