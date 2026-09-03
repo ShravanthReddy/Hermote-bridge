@@ -42,6 +42,10 @@ Run your own relay with `hermes-relay` (`deploy/relay/`); the app repository's `
   app uses; everything else is refused.
 - **Self-contained.** Standard-library crypto only; one pinned dependency (WebSocket). A single
   static binary; nothing is installed into or changed in your Hermes checkout or `config.yaml`.
+- **Notifies you when you're away.** With an APNs key from your Apple Developer account
+  (`push setup`), the bridge watches sessions only while a paired phone is offline and pushes
+  approvals, questions and finished turns — Approve / Deny straight from the banner. Tokens are
+  registered by the app over the encrypted channel; nothing else is exposed.
 
 ## Commands
 
@@ -51,6 +55,8 @@ hermes-remote pair            new QR (5-minute validity)
 hermes-remote status
 hermes-remote devices [revoke <id-prefix>]
 hermes-remote selftest        pair a throw-away client over loopback and exercise the tunnel
+hermes-remote push setup --team-id T --key-id K --p8 AuthKey_K.p8
+hermes-remote push status | test
 hermes-remote restart | stop | logs | uninstall
 ```
 
