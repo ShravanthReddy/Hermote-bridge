@@ -197,6 +197,12 @@ func (c *conn) proxyHTTP(ctx context.Context, req protocol.HTTPRequest) {
 		reply(http.StatusForbidden, []byte(RefusedRouteError))
 		return
 	}
+	if req.Method == http.MethodGet && req.Path == "/api/fs/list" {
+		// Answered here, off the gateway's event loop (see fs.go).
+		status, body := fsList(ctx, req.Query)
+		reply(status, body)
+		return
+	}
 	base, ok := c.srv.Gateway.BaseURL()
 	if !ok {
 		reply(http.StatusServiceUnavailable, []byte(`{"error":"gateway not ready"}`))
