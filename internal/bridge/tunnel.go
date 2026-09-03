@@ -32,6 +32,8 @@ func (c *conn) tunnel(ctx context.Context) error {
 	}
 	defer gw.Close(websocket.StatusNormalClosure, "")
 	gw.SetReadLimit(maxFrame)
+	c.terminals = newTerminalManager(c.sendJSON)
+	defer c.terminals.closeAll()
 	_ = c.sendJSON(ctx, protocol.CtlMessage{Ch: protocol.ChCtl, Op: protocol.CtlGateway, State: string(gateway.StateReady)})
 
 	errc := make(chan error, 3)
@@ -169,6 +171,15 @@ func (c *conn) dispatch(ctx context.Context, gw *websocket.Conn, plain []byte) e
 			return nil
 		}
 		return nil
+	case protocol.ChPTY:
+		var m protocol.PTYMessage
+		if err := json.Unmarshal(plain, &m); err != nil {
+			return err
+		}
+		if c.terminals == nil {
+			return nil
+		}
+		return c.terminals.handle(ctx, m)
 	case protocol.ChConfirm:
 		return errors.New("unexpected confirm after handshake")
 	}

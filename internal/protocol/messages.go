@@ -12,7 +12,34 @@ const (
 	ChCtl     = "ctl"     // liveness and lifecycle
 	ChChunk   = "chunk"   // piece of a large message
 	ChConfirm = "confirm" // handshake completion (first phone→bridge frame only)
+	ChPTY     = "pty"     // a shell on the Mac: open / data / resize / close / exit
 )
+
+// PTY operations (plan 10 / WP6). The phone opens a terminal with an id it
+// chooses; bytes flow both ways as "data"; the bridge reports "exit" when the
+// shell ends and "close" when it refuses or tears one down.
+const (
+	PTYOpen   = "open"
+	PTYData   = "data"
+	PTYResize = "resize"
+	PTYClose  = "close"
+	PTYExit   = "exit"
+)
+
+// PTYMessage is one frame on the pty channel. Data is raw terminal bytes
+// (base64url on the wire, like Chunk.Data); Cols/Rows accompany open and
+// resize; Code accompanies exit; Reason accompanies close.
+type PTYMessage struct {
+	Ch     string `json:"ch"`
+	Op     string `json:"op"`
+	ID     string `json:"id"`
+	Cols   int    `json:"cols,omitempty"`
+	Rows   int    `json:"rows,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
+	Data   Bytes  `json:"d,omitempty"`
+	Code   int    `json:"code,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
 
 // ChunkThreshold is the plaintext size above which a message is split.
 const ChunkThreshold = 1 << 20
@@ -84,7 +111,7 @@ func PeekChannel(plain []byte) (string, error) {
 		return "", err
 	}
 	switch probe.Ch {
-	case ChWS, ChHTTP, ChCtl, ChChunk, ChConfirm:
+	case ChWS, ChHTTP, ChCtl, ChChunk, ChConfirm, ChPTY:
 		return probe.Ch, nil
 	}
 	return "", ErrUnknownChannel

@@ -157,6 +157,8 @@ type conn struct {
 	deviceID string
 	sendMu   sync.Mutex
 	closed   sync.Once
+	// Shells this phone opened over the tunnel (plan 10 / WP6); nil until the first.
+	terminals *terminalManager
 }
 
 func (c *conn) close(code websocket.StatusCode, reason string) {
