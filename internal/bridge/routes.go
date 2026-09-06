@@ -1,14 +1,29 @@
 package bridge
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // RefusedRouteError is the JSON body the bridge returns (HTTP 403) for a REST
 // route outside the allow-list. HermesKit matches it verbatim to tell the user
 // their hermes-remote is older than the app (docs/REMOTE-ACCESS.md §7).
 const RefusedRouteError = `{"error":"path not allowed through the bridge"}`
+
+const MalformedRequestError = `{"error":"malformed bridge request"}`
+
+var (
+	errInvalidPath  = errors.New("invalid bridge path")
+	errInvalidQuery = errors.New("invalid bridge query")
+)
+
+type canonicalPath struct {
+	Path    string
+	RawPath string
+}
 
 // route is one allowed REST route: an HTTP method and a path prefix. A prefix
 // ending in "/" also matches the bare path without the slash, so "/api/sessions/"
@@ -99,6 +114,10 @@ var allowedRoutes = []route{
 	{http.MethodPost, "/api/memory/providers/"},
 	{http.MethodGet, "/api/learning/"},
 	{http.MethodPost, "/api/learning/"},
+	// Starmap node mutations are exact routes. Do not widen PUT or DELETE to
+	// the learning prefix: the phone cannot mutate another learning endpoint.
+	{http.MethodPut, "/api/learning/node"},
+	{http.MethodDelete, "/api/learning/node"},
 	{http.MethodGet, "/api/curator"},
 	{http.MethodPost, "/api/curator/"},
 	{http.MethodPut, "/api/curator/"},
@@ -136,11 +155,9 @@ var allowedRoutes = []route{
 	{http.MethodPost, "/api/plugins/"},
 }
 
-// routeAllowed reports whether the phone may proxy method+path to the gateway.
+// routeAllowed reports whether an already-canonical method+path may be
+// proxied to the gateway.
 func routeAllowed(method, path string) bool {
-	if strings.Contains(path, "..") {
-		return false
-	}
 	for _, r := range allowedRoutes {
 		if r.method != method {
 			continue
@@ -153,4 +170,99 @@ func routeAllowed(method, path string) bool {
 		}
 	}
 	return false
+}
+
+// canonicalizePath admits one origin-form path spelling and returns its single
+// decoded representation. Ambiguous encodings are rejected instead of being
+// normalized differently by the route table, filesystem intercept, or proxy.
+func canonicalizePath(raw string) (canonicalPath, error) {
+	if raw == "" || raw[0] != '/' || strings.ContainsAny(raw, "?#\\\x00") || strings.Contains(raw, "//") {
+		return canonicalPath{}, errInvalidPath
+	}
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if b != '%' {
+			if !isPathByte(b) {
+				return canonicalPath{}, errInvalidPath
+			}
+			continue
+		}
+		if i+2 >= len(raw) || !isHex(raw[i+1]) || !isHex(raw[i+2]) {
+			return canonicalPath{}, errInvalidPath
+		}
+		decoded := unhex(raw[i+1])<<4 | unhex(raw[i+2])
+		if decoded == '/' || decoded == '\\' || decoded == '%' || isUnreserved(decoded) {
+			return canonicalPath{}, errInvalidPath
+		}
+		i += 2
+	}
+	decoded, err := url.PathUnescape(raw)
+	if err != nil || !utf8.ValidString(decoded) || strings.ContainsRune(decoded, '\\') || hasControlByte(decoded) {
+		return canonicalPath{}, errInvalidPath
+	}
+	for _, segment := range strings.Split(decoded, "/") {
+		if segment == "." || segment == ".." {
+			return canonicalPath{}, errInvalidPath
+		}
+	}
+	return canonicalPath{Path: decoded, RawPath: raw}, nil
+}
+
+func isPathByte(b byte) bool {
+	return isUnreserved(b) || b == '/' || strings.ContainsRune("!$&'()*+,;=:@", rune(b))
+}
+
+func hasControlByte(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// validateRawQuery accepts the RFC 3986 query production used by
+// URLComponents and preserves it verbatim for the gateway request.
+func validateRawQuery(raw string) error {
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if b >= utf8.RuneSelf || b < 0x21 || b == 0x7f || b == '#' {
+			return errInvalidQuery
+		}
+		if b == '%' {
+			if i+2 >= len(raw) || !isHex(raw[i+1]) || !isHex(raw[i+2]) {
+				return errInvalidQuery
+			}
+			i += 2
+			continue
+		}
+		if !isQueryByte(b) {
+			return errInvalidQuery
+		}
+	}
+	return nil
+}
+
+func isQueryByte(b byte) bool {
+	return isUnreserved(b) || strings.ContainsRune("!$&'()*+,;=:@/?", rune(b))
+}
+
+func isUnreserved(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' ||
+		b == '-' || b == '.' || b == '_' || b == '~'
+}
+
+func isHex(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+func unhex(b byte) byte {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0'
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10
+	default:
+		return b - 'A' + 10
+	}
 }

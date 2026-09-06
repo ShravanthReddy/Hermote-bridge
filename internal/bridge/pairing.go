@@ -22,11 +22,13 @@ func (p *pairings) Issue(ttl time.Duration) ([]byte, time.Time, error) {
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	exp := time.Now().Add(ttl).UTC()
+	// Keep the monotonic component internally so wall-clock adjustments cannot
+	// extend a code. Only the caller-facing timestamp is converted to UTC.
+	exp := time.Now().Add(ttl)
 	p.mu.Lock()
 	p.codes[string(code)] = exp
 	p.mu.Unlock()
-	return code, exp, nil
+	return code, exp.UTC(), nil
 }
 
 // Outstanding returns the unexpired codes (and prunes expired ones).
@@ -36,7 +38,7 @@ func (p *pairings) Outstanding() [][]byte {
 	now := time.Now()
 	var out [][]byte
 	for c, exp := range p.codes {
-		if now.After(exp) {
+		if !now.Before(exp) {
 			delete(p.codes, c)
 			continue
 		}
@@ -45,15 +47,24 @@ func (p *pairings) Outstanding() [][]byte {
 	return out
 }
 
-// Consume retires a code after a successful pairing (single use).
-func (p *pairings) Consume(code []byte) {
+// Consume atomically verifies that code still exists and has not expired, then
+// retires it. Exactly one concurrent caller can succeed.
+func (p *pairings) Consume(code []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for c := range p.codes {
+	now := time.Now()
+	consumed := false
+	for c, exp := range p.codes {
+		if !now.Before(exp) {
+			delete(p.codes, c)
+			continue
+		}
 		if subtle.ConstantTimeCompare([]byte(c), code) == 1 {
 			delete(p.codes, c)
+			consumed = true
 		}
 	}
+	return consumed
 }
 
 // Pending reports how many codes are outstanding.

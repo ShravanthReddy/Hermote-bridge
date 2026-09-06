@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/user"
@@ -23,16 +24,11 @@ import (
 // The response mirrors the gateway's exactly ({entries:[{name,path,
 // isDirectory}], error?}) so the phone needs no change.
 
-const fsListTimeout = 10 * time.Second
-
 // fsHiddenNames mirrors the gateway's `_FS_READDIR_HIDDEN`.
 var fsHiddenNames = map[string]bool{
 	".git": true, ".hg": true, ".svn": true, ".cache": true, ".next": true, ".turbo": true, ".venv": true,
 	"__pycache__": true, "build": true, "dist": true, "node_modules": true, "target": true, "venv": true,
 }
-
-// fsReadDir is swapped by tests to simulate a folder that never answers.
-var fsReadDir = os.ReadDir
 
 type fsEntry struct {
 	Name        string `json:"name"`
@@ -43,44 +39,79 @@ type fsEntry struct {
 type fsListing struct {
 	Entries []fsEntry `json:"entries"`
 	Error   string    `json:"error,omitempty"`
+	Detail  string    `json:"detail,omitempty"`
 }
 
 // fsList answers GET /api/fs/list?path=… Status 400 for an unusable path,
 // otherwise 200 with the gateway's shape (errors ride inside the body).
 func fsList(ctx context.Context, rawQuery string) (int, []byte) {
-	values, _ := url.ParseQuery(rawQuery)
-	target, err := fsResolvePath(values.Get("path"))
-	if err != nil {
-		body, _ := json.Marshal(map[string]string{"detail": err.Error()})
-		return 400, body
+	status, body, _ := fsListWithDependencies(
+		ctx, rawQuery, productionBridgeDependencies(), nil, slog.Default(),
+	)
+	return status, body
+}
+
+func fsListWithDependencies(
+	ctx context.Context, rawQuery string, deps bridgeDependencies, lease *workLease, logger *slog.Logger,
+) (int, []byte, error) {
+	values, queryErr := url.ParseQuery(rawQuery)
+	if queryErr != nil {
+		// Query parsing is the only synchronous exit after FS admission. No
+		// worker owns the lease on this path, so release it explicitly.
+		if lease != nil {
+			lease.release()
+		}
+		status, body := fsListingResponse(400, fsListing{Entries: []fsEntry{}, Detail: "Invalid path"})
+		return status, body, nil
 	}
+	listCtx, cancel := context.WithTimeout(ctx, deps.fsListTimeout)
+	defer cancel()
 	type result struct {
-		entries []os.DirEntry
-		err     error
+		status int
+		body   []byte
 	}
 	done := make(chan result, 1)
+	owned := make(chan struct{})
+	if deps.fsWarningAfter > 0 {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		go func() {
+			timer := time.NewTimer(deps.fsWarningAfter)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				logger.Warn("filesystem listing still holds bridge capacity")
+			case <-owned:
+			}
+		}()
+	}
 	go func() {
-		entries, err := fsReadDir(target)
-		done <- result{entries, err}
-	}()
-	ctx, cancel := context.WithTimeout(ctx, fsListTimeout)
-	defer cancel()
-	var listing fsListing
-	listing.Entries = []fsEntry{}
-	select {
-	case <-ctx.Done():
-		listing.Error = "ETIMEDOUT"
-	case r := <-done:
+		var completed result
+		defer func() { done <- completed }()
+		defer close(owned)
+		if lease != nil {
+			defer lease.release()
+		}
+
+		target, err := deps.fsResolvePath(values.Get("path"))
+		if err != nil {
+			completed.status, completed.body = fsListingResponse(
+				400, fsListing{Entries: []fsEntry{}, Detail: err.Error()},
+			)
+			return
+		}
+		entries, readErr := deps.fsReadDir(target)
+		listing := fsListing{Entries: []fsEntry{}}
 		switch {
-		case r.err == nil:
-			for _, entry := range r.entries {
-				if fsHiddenNames[entry.Name()] {
+		case readErr == nil:
+			for _, entry := range entries {
+				name := entry.Name()
+				if fsHiddenNames[name] {
 					continue
 				}
 				listing.Entries = append(listing.Entries, fsEntry{
-					Name:        entry.Name(),
-					Path:        filepath.Join(target, entry.Name()),
-					IsDirectory: entry.IsDir(),
+					Name: name, Path: filepath.Join(target, name), IsDirectory: entry.IsDir(),
 				})
 			}
 			sort.Slice(listing.Entries, func(i, j int) bool {
@@ -93,18 +124,32 @@ func fsList(ctx context.Context, rawQuery string) (int, []byte) {
 				}
 				return a.Name < b.Name
 			})
-		case errors.Is(r.err, os.ErrNotExist):
+		case errors.Is(readErr, os.ErrNotExist):
 			listing.Error = "ENOENT"
-		case errors.Is(r.err, os.ErrPermission):
+		case errors.Is(readErr, os.ErrPermission):
 			listing.Error = "EACCES"
-		case isNotDir(r.err):
+		case isNotDir(readErr):
 			listing.Error = "ENOTDIR"
 		default:
 			listing.Error = "read-error"
 		}
+		completed.status, completed.body = fsListingResponse(200, listing)
+	}()
+	select {
+	case <-listCtx.Done():
+		if ctx.Err() != nil {
+			return 0, nil, ctx.Err()
+		}
+		status, body := fsListingResponse(200, fsListing{Entries: []fsEntry{}, Error: "ETIMEDOUT"})
+		return status, body, nil
+	case r := <-done:
+		return r.status, r.body, nil
 	}
+}
+
+func fsListingResponse(status int, listing fsListing) (int, []byte) {
 	body, _ := json.Marshal(listing)
-	return 200, body
+	return status, body
 }
 
 // fsResolvePath mirrors the gateway's `_fs_path`: `~` expands, `file:` URLs

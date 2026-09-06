@@ -1,16 +1,13 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,25 +29,53 @@ func (c *conn) tunnel(ctx context.Context) error {
 	}
 	defer gw.Close(websocket.StatusNormalClosure, "")
 	gw.SetReadLimit(maxFrame)
-	c.terminals = newTerminalManager(c.sendJSON)
+	var failOnce sync.Once
+	var firstErr error
+	failed := make(chan struct{})
+	fail := func(err error) {
+		if err == nil {
+			return
+		}
+		failOnce.Do(func() {
+			firstErr = err
+			cancel()
+			close(failed)
+		})
+	}
+	c.terminals = newTerminalManager(func(sendCtx context.Context, value any) error {
+		err := c.sendJSON(sendCtx, value)
+		if err != nil {
+			fail(err)
+		}
+		return err
+	})
 	defer c.terminals.closeAll()
-	_ = c.sendJSON(ctx, protocol.CtlMessage{Ch: protocol.ChCtl, Op: protocol.CtlGateway, State: string(gateway.StateReady)})
+	if err := c.sendJSON(ctx, protocol.CtlMessage{
+		Ch: protocol.ChCtl, Op: protocol.CtlGateway, State: string(gateway.StateReady),
+	}); err != nil {
+		return err
+	}
 
-	errc := make(chan error, 3)
+	var loops sync.WaitGroup
+	loops.Add(3)
 
 	// gateway → phone
 	go func() {
+		defer loops.Done()
 		for {
 			typ, data, err := gw.Read(ctx)
 			if err != nil {
-				errc <- fmt.Errorf("gateway read: %w", err)
+				fail(fmt.Errorf("gateway read: %w", err))
 				return
 			}
 			if typ != websocket.MessageText {
 				data = []byte(string(data)) // gateway only speaks text; tolerate binary as UTF-8
 			}
 			if err := c.sendJSON(ctx, protocol.WSMessage{Ch: protocol.ChWS, Data: string(data)}); err != nil {
-				errc <- err
+				if errors.Is(err, errPlaintextLimit) {
+					c.bestEffortGatewayLimitClose()
+				}
+				fail(err)
 				return
 			}
 		}
@@ -58,15 +83,16 @@ func (c *conn) tunnel(ctx context.Context) error {
 
 	// phone → gateway / http / ctl
 	go func() {
+		defer loops.Done()
 		var asm protocol.ChunkAssembler
 		for {
 			plain, err := c.recv(ctx, &asm)
 			if err != nil {
-				errc <- err
+				fail(err)
 				return
 			}
-			if err := c.dispatch(ctx, gw, plain); err != nil {
-				errc <- err
+			if err := c.dispatch(ctx, gw, plain, fail); err != nil {
+				fail(err)
 				return
 			}
 		}
@@ -74,6 +100,7 @@ func (c *conn) tunnel(ctx context.Context) error {
 
 	// liveness + gateway state relay
 	go func() {
+		defer loops.Done()
 		ticker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
 		states := c.srv.Gateway.Watch()
@@ -84,22 +111,53 @@ func (c *conn) tunnel(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				if err := c.sendJSON(ctx, protocol.CtlMessage{Ch: protocol.ChCtl, Op: protocol.CtlPing}); err != nil {
-					errc <- err
+					fail(err)
 					return
 				}
-			case st := <-states:
-				_ = c.sendJSON(ctx, protocol.CtlMessage{Ch: protocol.ChCtl, Op: protocol.CtlGateway, State: string(st)})
+			case st, ok := <-states:
+				if !ok {
+					fail(errors.New("gateway state watcher closed"))
+					return
+				}
+				if err := c.sendJSON(ctx, protocol.CtlMessage{
+					Ch: protocol.ChCtl, Op: protocol.CtlGateway, State: string(st),
+				}); err != nil {
+					fail(err)
+					return
+				}
 				if st != gateway.StateReady {
 					// This connection's gateway socket is gone with the child; the
 					// phone reconnects and replays (ADR-008) once the child is back.
-					errc <- errors.New("gateway restarted")
+					fail(errors.New("gateway restarted"))
 					return
 				}
 			}
 		}
 	}()
 
-	return <-errc
+	select {
+	case <-failed:
+	case <-ctx.Done():
+		fail(ctx.Err())
+		<-failed
+	}
+	loops.Wait()
+	return firstErr
+}
+
+func (c *conn) bestEffortGatewayLimitClose() {
+	if !c.sendMu.TryLock() {
+		return
+	}
+	defer c.sendMu.Unlock()
+	closeCtx, cancel := context.WithTimeout(context.Background(), c.srv.deps.closeWriteTimeout)
+	defer cancel()
+	raw, err := json.Marshal(protocol.CtlMessage{
+		Ch: protocol.ChCtl, Op: protocol.CtlClose, Reason: "gateway frame exceeds bridge limit",
+	})
+	if err == nil {
+		_ = c.sendLocked(closeCtx, raw)
+	}
 }
 
 // dialGateway opens this connection's private socket to the gateway child,
@@ -130,7 +188,9 @@ func (c *conn) dialGateway(ctx context.Context) (*websocket.Conn, error) {
 	}
 }
 
-func (c *conn) dispatch(ctx context.Context, gw *websocket.Conn, plain []byte) error {
+func (c *conn) dispatch(
+	ctx context.Context, gw *websocket.Conn, plain []byte, fail func(error),
+) error {
 	ch, err := protocol.PeekChannel(plain)
 	if err != nil {
 		return err
@@ -149,8 +209,7 @@ func (c *conn) dispatch(ctx context.Context, gw *websocket.Conn, plain []byte) e
 		if err := json.Unmarshal(plain, &req); err != nil {
 			return err
 		}
-		go c.proxyHTTP(ctx, req)
-		return nil
+		return c.startProxyHTTP(ctx, req, fail)
 	case protocol.ChCtl:
 		var m protocol.CtlMessage
 		if err := json.Unmarshal(plain, &m); err != nil {
@@ -185,62 +244,6 @@ func (c *conn) dispatch(ctx context.Context, gw *websocket.Conn, plain []byte) e
 		return errors.New("unexpected confirm after handshake")
 	}
 	return protocol.ErrUnknownChannel
-}
-
-// proxyHTTP performs one REST call against the loopback gateway with the
-// session token and returns the response on the http channel.
-func (c *conn) proxyHTTP(ctx context.Context, req protocol.HTTPRequest) {
-	reply := func(status int, body []byte) {
-		_ = c.sendJSON(ctx, protocol.HTTPResponse{Ch: protocol.ChHTTP, ID: req.ID, Status: status, Body: body})
-	}
-	if !routeAllowed(req.Method, req.Path) {
-		reply(http.StatusForbidden, []byte(RefusedRouteError))
-		return
-	}
-	if req.Method == http.MethodGet && req.Path == "/api/fs/list" {
-		// Answered here, off the gateway's event loop (see fs.go).
-		status, body := fsList(ctx, req.Query)
-		reply(status, body)
-		return
-	}
-	base, ok := c.srv.Gateway.BaseURL()
-	if !ok {
-		reply(http.StatusServiceUnavailable, []byte(`{"error":"gateway not ready"}`))
-		return
-	}
-	target := base + req.Path
-	if req.Query != "" {
-		target += "?" + req.Query
-	}
-	var body io.Reader
-	if len(req.Body) > 0 {
-		body = bytes.NewReader(req.Body)
-	}
-	hreq, err := http.NewRequestWithContext(ctx, req.Method, target, body)
-	if err != nil {
-		reply(http.StatusBadRequest, []byte(`{"error":`+strconv.Quote(err.Error())+`}`))
-		return
-	}
-	hreq.Header.Set("X-Hermes-Session-Token", c.srv.Gateway.Token())
-	if body != nil {
-		hreq.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.srv.httpClient.Do(hreq)
-	if err != nil {
-		reply(http.StatusBadGateway, []byte(`{"error":`+strconv.Quote(err.Error())+`}`))
-		return
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, protocol.MaxPlaintext))
-	if err != nil {
-		reply(http.StatusBadGateway, []byte(`{"error":"read failed"}`))
-		return
-	}
-	if !json.Valid(data) {
-		// Non-JSON bodies (e.g. /api/media bytes) travel as a JSON string.
-		data, _ = json.Marshal(string(data))
-	}
-	reply(resp.StatusCode, data)
 }
 
 func mustDecodeID(id string) []byte {

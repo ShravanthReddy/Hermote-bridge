@@ -118,7 +118,7 @@ func (d *RelayDialer) runOnce(ctx context.Context) error {
 	d.setAttached(true, nil)
 	d.Logger.Info("attached to relay", "relay", d.RelayURL)
 
-	mux := &relayMux{ws: ws, channels: map[uint16]*relayChannel{}}
+	mux := newRelayMux(ws)
 	defer func() {
 		// Drop the socket first so in-flight writes fail, then finish channels.
 		ws.Close(websocket.StatusGoingAway, "")
@@ -199,10 +199,10 @@ func (d *RelayDialer) keepalive(ctx context.Context, end context.CancelFunc, ws 
 
 // relayMux owns the relay socket's write side and the live channels.
 type relayMux struct {
-	ws       *websocket.Conn
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	channels map[uint16]*relayChannel
+	ws        *websocket.Conn
+	writeGate chan struct{}
+	mu        sync.Mutex
+	channels  map[uint16]*relayChannel
 }
 
 type relayMsg struct {
@@ -210,11 +210,24 @@ type relayMsg struct {
 	data []byte
 }
 
+func newRelayMux(ws *websocket.Conn) *relayMux {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &relayMux{ws: ws, writeGate: gate, channels: map[uint16]*relayChannel{}}
+}
+
 func (m *relayMux) write(ctx context.Context, frame []byte) error {
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
 	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	select {
+	case <-m.writeGate:
+		defer func() { m.writeGate <- struct{}{} }()
+		if err := wctx.Err(); err != nil {
+			return err
+		}
+	case <-wctx.Done():
+		return wctx.Err()
+	}
 	return m.ws.Write(wctx, websocket.MessageBinary, frame)
 }
 
