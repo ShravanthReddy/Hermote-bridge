@@ -247,11 +247,10 @@ func (d *daemon) Pair(ctx context.Context) (control.PairResult, error) {
 
 // Revoke implements control.Backend.
 func (d *daemon) Revoke(_ context.Context, idOrPrefix string) (state.Device, error) {
-	dev, err := d.store.Revoke(idOrPrefix)
+	dev, err := d.srv.Revoke(idOrPrefix)
 	if err != nil {
 		return state.Device{}, err
 	}
-	d.srv.DisconnectDevice(dev.ID)
 	d.log.Info("device revoked", "device", dev.ID)
 	return dev, nil
 }

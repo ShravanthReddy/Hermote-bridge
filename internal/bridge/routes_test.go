@@ -37,10 +37,91 @@ func TestRouteAllowed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := routeAllowed(tc.method, tc.path); got != tc.want {
+			canonical, err := canonicalizePath(tc.path)
+			got := err == nil && routeAllowed(tc.method, canonical.Path)
+			if got != tc.want {
 				t.Fatalf("routeAllowed(%s %s) = %v, want %v", tc.method, tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCanonicalizePathRejectsAmbiguousSpellings(t *testing.T) {
+	cases := []string{
+		"", "api/status", "https://127.0.0.1/api/status", "/api/status?x=1", "/api/status#fragment",
+		"/api//status", "/api/./status", "/api/fs/../status", "/api/fs/%2e%2e/status",
+		"/api/fs/%2E/status", "/api/fs/%2fetc", "/api/fs/%2Fetc", "/api/fs/%5cetc",
+		"/api/fs/%5Cetc", "/api/fs/%25etc", "/api/fs/%252e%252e", "/api/fs/%6cist",
+		"/api/fs/%6List", "/api/fs/%00list", "/api/fs/%", "/api/fs/%0", "/api/fs/%GG", "/api/fs\\list",
+		"/api/fs/\x00list", "/api/fs/\nlist",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			if got, err := canonicalizePath(raw); err == nil {
+				t.Fatalf("canonicalizePath(%q) = %+v, want error", raw, got)
+			}
+		})
+	}
+
+	got, err := canonicalizePath("/api/profiles/%E2%9C%93")
+	if err != nil || got.Path != "/api/profiles/✓" || got.RawPath != "/api/profiles/%E2%9C%93" {
+		t.Fatalf("encoded UTF-8 path = %+v, %v", got, err)
+	}
+}
+
+func TestCanonicalRouteBoundariesAndInterpolatedCallsites(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{http.MethodGet, "/api/fs", true},
+		{http.MethodGet, "/api/fs/list", true},
+		{http.MethodGet, "/api/fsx", false},
+		{http.MethodPatch, "/api/sessions/session-1", true},
+		{http.MethodGet, "/api/sessions/session-1/messages", true},
+		{http.MethodDelete, "/api/profiles/research", true},
+		{http.MethodPost, "/api/providers/oauth/openai/start", true},
+		{http.MethodGet, "/api/providers/oauth/openai/poll/oauth-session", true},
+		{http.MethodDelete, "/api/providers/oauth/sessions/oauth-session", true},
+		{http.MethodPost, "/api/providers/custom-endpoints/local/activate", true},
+		{http.MethodGet, "/api/local-models/jobs/job-1", true},
+		{http.MethodDelete, "/api/local-models/models/qwen3-8b-q4", true},
+		{http.MethodPut, "/api/mcp/servers/image_gen/enabled", true},
+		{http.MethodGet, "/api/memory/providers/honcho/config", true},
+		{http.MethodPost, "/api/memory/providers/honcho/setup", true},
+		{http.MethodPut, "/api/messaging/platforms/telegram", true},
+		{http.MethodGet, "/api/messaging/telegram/onboarding/pair-1", true},
+		{http.MethodDelete, "/api/webhooks/deploy", true},
+		{http.MethodPut, "/api/tools/toolsets/browser/config", true},
+		{http.MethodGet, "/api/actions/doctor/status", true},
+	}
+	for _, tc := range cases {
+		canonical, err := canonicalizePath(tc.path)
+		if err != nil {
+			t.Fatalf("canonicalizePath(%q): %v", tc.path, err)
+		}
+		if got := routeAllowed(tc.method, canonical.Path); got != tc.want {
+			t.Errorf("routeAllowed(%s %s) = %v, want %v", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestValidateRawQuery(t *testing.T) {
+	accepted := []string{
+		"", "limit=20&offset=0", "name=hello+world", "name=%E2%9C%93", "x=a/b?c:d@e",
+		"symbols=!$&'()*+,;=:@/?", "encoded=%23%20%25",
+	}
+	for _, raw := range accepted {
+		if err := validateRawQuery(raw); err != nil {
+			t.Errorf("validateRawQuery(%q): %v", raw, err)
+		}
+	}
+	rejected := []string{"raw=✓", "bad=%", "bad=%0", "bad=%GG", "x=#fragment", "x=hello world", "x=\t", "x=\x00", "x=[a]"}
+	for _, raw := range rejected {
+		if err := validateRawQuery(raw); err == nil {
+			t.Errorf("validateRawQuery(%q) succeeded", raw)
+		}
 	}
 }
 

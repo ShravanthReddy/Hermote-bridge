@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -81,16 +82,19 @@ func TestFSListReportsMissingAndNonDirectoryLikeTheGateway(t *testing.T) {
 }
 
 func TestFSListGivesUpOnAFolderThatNeverAnswers(t *testing.T) {
-	previous := fsReadDir
-	fsReadDir = func(string) ([]os.DirEntry, error) {
+	deps := productionBridgeDependencies()
+	deps.fsReadDir = func(string) ([]os.DirEntry, error) {
 		time.Sleep(200 * time.Millisecond)
 		return nil, nil
 	}
-	defer func() { fsReadDir = previous }()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	deps.fsListTimeout = 50 * time.Millisecond
+	deps.fsWarningAfter = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	status, body := fsList(ctx, "path="+url.QueryEscape(t.TempDir()))
+	status, body, _ := fsListWithDependencies(
+		ctx, "path="+url.QueryEscape(t.TempDir()), deps, nil, slog.Default(),
+	)
 	if status != 200 || decodeListing(t, body).Error != "ETIMEDOUT" {
 		t.Fatalf("status %d body %s", status, body)
 	}

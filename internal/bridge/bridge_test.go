@@ -1,13 +1,18 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,12 +79,25 @@ func fakeGateway(t *testing.T, token string) *httptest.Server {
 }
 
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
+	return newTestServerWithHooksAndLogger(t, nil, nil)
+}
+
+func newTestServerWithHooks(t *testing.T, hooks *admissionTestHooks) (*Server, *httptest.Server) {
+	return newTestServerWithHooksAndLogger(t, hooks, nil)
+}
+
+func newTestServerWithHooksAndLogger(t *testing.T, hooks *admissionTestHooks, logger *slog.Logger) (*Server, *httptest.Server) {
 	t.Helper()
 	t.Setenv("HERMES_HOME", t.TempDir())
 	st, err := state.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close Store: %v", err)
+		}
+	})
 	id, err := st.Identity()
 	if err != nil {
 		t.Fatal(err)
@@ -93,10 +111,43 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	port := gw.Listener.Addr().(interface{ String() string }).String()
 	port = port[strings.LastIndex(port, ":")+1:]
 	gateway.ForceReadyForTest(sup, port)
-	srv := New(id, st, sup, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	srv := New(id, st, sup, logger)
+	srv.testHooks = hooks
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return srv, hs
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func receiveTestValue[T any](t *testing.T, ctx context.Context, ch <-chan T, label string) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s: %v", label, ctx.Err())
+		var zero T
+		return zero
+	}
 }
 
 // phoneClient is a minimal Go stand-in for the iOS BridgeLink.
@@ -117,16 +168,25 @@ func connectPhoneURL(t *testing.T, ctx context.Context, url string, bridgeID *pr
 	t.Helper()
 	ws, _, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = ws.Close(websocket.StatusInternalError, "phone setup failed")
+		}
+	}()
 	ws.SetReadLimit(maxFrame)
 	hello, ps, err := protocol.PhoneHello(phone, bridgeID.SessionID(), nil)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	raw, _ := json.Marshal(hello)
+	raw, err := json.Marshal(hello)
+	if err != nil {
+		return nil, err
+	}
 	if err := ws.Write(ctx, websocket.MessageText, raw); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	_, acceptRaw, err := ws.Read(ctx)
 	if err != nil {
@@ -134,16 +194,26 @@ func connectPhoneURL(t *testing.T, ctx context.Context, url string, bridgeID *pr
 	}
 	var accept protocol.Accept
 	if err := json.Unmarshal(acceptRaw, &accept); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	confirm, suite, err := ps.Finish(accept, bridgeID.Public(), code)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	if err := ws.Write(ctx, websocket.MessageBinary, confirm); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
+	failed = false
 	return &phoneClient{ws: ws, suite: suite}, nil
+}
+
+func admissionAccepted(p *phoneClient, ctx context.Context) bool {
+	ch, plain, err := p.recv(ctx)
+	if err != nil || ch != protocol.ChCtl {
+		return false
+	}
+	var ctl protocol.CtlMessage
+	return json.Unmarshal(plain, &ctl) == nil && ctl.Op == protocol.CtlAccepted
 }
 
 func (p *phoneClient) send(ctx context.Context, v any) error {
@@ -281,16 +351,485 @@ func TestPairThenTunnel(t *testing.T) {
 		t.Fatalf("trusted reconnect failed: %v", err)
 	}
 	// Revocation disconnects it.
-	if _, err := srv.Store.Revoke(protocol.DeviceID(phone.Public())[:6]); err != nil {
+	dropped := make(chan error, 1)
+	go func() {
+		_, _, err := p2.recv(ctx)
+		dropped <- err
+	}()
+	if _, err := srv.Revoke(protocol.DeviceID(phone.Public())[:6]); err != nil {
 		t.Fatal(err)
 	}
-	srv.DisconnectDevice(protocol.DeviceID(phone.Public()))
-	if _, _, err := p2.recv(ctx); err == nil {
+	if err := receiveTestValue(t, ctx, dropped, "revoked connection close"); err == nil {
 		t.Fatal("revoked device still connected")
 	}
 	if _, err := connectPhone(t, ctx, hs, srv.Identity, phone, nil); err == nil {
 		t.Log("handshake accepted at transport level; tunnel must not open")
 	}
+}
+
+func TestOnePairingCodeAdmitsExactlyOneConcurrentPhone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	hooks := &admissionTestHooks{afterDecision: func() {
+		arrived <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}}
+	srv, hs := newTestServerWithHooks(t, hooks)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phones := make([]*protocol.Identity, 2)
+	for i := range phones {
+		phones[i], _ = protocol.NewIdentity(nil)
+	}
+	type result struct {
+		index  int
+		client *phoneClient
+		err    error
+	}
+	connected := make(chan result, 2)
+	for i := range phones {
+		go func(i int) {
+			client, err := connectPhone(t, ctx, hs, srv.Identity, phones[i], code)
+			connected <- result{i, client, err}
+		}(i)
+	}
+	clients := make([]*phoneClient, 2)
+	for range clients {
+		result := receiveTestValue(t, ctx, connected, "concurrent phone setup")
+		if result.err != nil {
+			t.Fatalf("phone %d setup: %v", result.index, result.err)
+		}
+		clients[result.index] = result.client
+	}
+	receiveTestValue(t, ctx, arrived, "first pairing contender")
+	receiveTestValue(t, ctx, arrived, "second pairing contender")
+	releaseOnce.Do(func() { close(release) })
+
+	accepted := make(chan result, 2)
+	for i, client := range clients {
+		go func(i int, client *phoneClient) {
+			if admissionAccepted(client, ctx) {
+				accepted <- result{index: i, client: client}
+				return
+			}
+			accepted <- result{index: -1, client: client}
+		}(i, client)
+	}
+	winner, loser := -1, -1
+	for range clients {
+		result := receiveTestValue(t, ctx, accepted, "concurrent admission result")
+		if result.index >= 0 {
+			if winner >= 0 {
+				t.Fatal("both phones were admitted with one code")
+			}
+			winner = result.index
+		} else if result.client == clients[0] {
+			loser = 0
+		} else {
+			loser = 1
+		}
+	}
+	if winner < 0 || loser < 0 || winner == loser {
+		t.Fatalf("winner=%d loser=%d", winner, loser)
+	}
+	devices, err := srv.Store.Devices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0].ID != protocol.DeviceID(phones[winner].Public()) {
+		t.Fatalf("trusted devices = %+v, winner %d", devices, winner)
+	}
+	if srv.Pairings.Pending() != 0 {
+		t.Fatal("single-use pairing code remained outstanding")
+	}
+
+	retry, err := connectPhone(t, ctx, hs, srv.Identity, phones[loser], nil)
+	if err == nil {
+		if admissionAccepted(retry, ctx) {
+			t.Fatal("losing phone reconnected without a new code")
+		}
+		_ = retry.ws.Close(websocket.StatusNormalClosure, "")
+	}
+	for _, client := range clients {
+		_ = client.ws.Close(websocket.StatusNormalClosure, "")
+	}
+}
+
+func TestCorruptTrustStateConsumesCodeAndRefusesAdmission(t *testing.T) {
+	srv, hs := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := os.WriteFile(srv.Store.Path("devices.json"), []byte("{corrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admissionAccepted(client, ctx) {
+		t.Fatal("corrupt trust state admitted a new phone")
+	}
+	if srv.Pairings.Pending() != 0 {
+		t.Fatal("failed persistence restored the consumed code")
+	}
+	if err := os.WriteFile(srv.Store.Path("devices.json"), []byte("[]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err == nil && admissionAccepted(retry, ctx) {
+		t.Fatal("consumed code succeeded after trust state was repaired")
+	}
+	if retry != nil {
+		_ = retry.ws.Close(websocket.StatusNormalClosure, "")
+	}
+}
+
+func TestCommittedPairingDiagnosticAcceptsAndWarns(t *testing.T) {
+	diagnostic := errors.New("injected committed pairing diagnostic")
+	hooks := &admissionTestHooks{addTrustedResult: func(err error) error {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %w", state.ErrMutationCommitted, diagnostic)
+	}}
+	var logs lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv, hs := newTestServerWithHooksAndLogger(t, hooks, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	phone, _ := protocol.NewIdentity(nil)
+	deviceID := protocol.DeviceID(phone.Public())
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(first, ctx) {
+		t.Fatalf("committed pairing was not accepted: %v", err)
+	}
+	if srv.Pairings.Pending() != 0 {
+		t.Fatal("committed pairing restored its one-time code")
+	}
+	devices, err := srv.Store.Devices()
+	if err != nil || len(devices) != 1 || devices[0].ID != deviceID {
+		t.Fatalf("committed pairing record = %+v, %v", devices, err)
+	}
+	reconnect, err := connectPhone(t, ctx, hs, srv.Identity, phone, nil)
+	if err != nil || !admissionAccepted(reconnect, ctx) {
+		t.Fatalf("proof-less reconnect after committed pairing: %v", err)
+	}
+	logText := logs.String()
+	for _, want := range []string{"paired device trust committed with post-commit diagnostic", deviceID, diagnostic.Error()} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("pairing warning missing %q: %s", want, logText)
+		}
+	}
+	_ = first.ws.Close(websocket.StatusNormalClosure, "")
+	_ = reconnect.ws.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestCommittedRevocationDiagnosticReconcilesBeforeReturn(t *testing.T) {
+	diagnostic := errors.New("injected committed revocation diagnostic")
+	hooks := &admissionTestHooks{revokeResult: func(dev state.Device, err error) (state.Device, error) {
+		if err != nil {
+			return dev, err
+		}
+		return dev, fmt.Errorf("%w: %w", state.ErrMutationCommitted, diagnostic)
+	}}
+	var logs lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv, hs := newTestServerWithHooksAndLogger(t, hooks, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	phone, _ := protocol.NewIdentity(nil)
+	deviceID := protocol.DeviceID(phone.Public())
+	code, _, _ := srv.Pairings.Issue(time.Minute)
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(client, ctx) {
+		t.Fatalf("initial pairing failed: %v", err)
+	}
+	removed, err := srv.Revoke(deviceID)
+	if removed.ID != deviceID || !errors.Is(err, state.ErrMutationCommitted) || !errors.Is(err, diagnostic) {
+		t.Fatalf("committed revoke result = %+v, %v", removed, err)
+	}
+	if closeErr := readUntilPhoneClose(client, ctx); closeErr == nil {
+		t.Fatal("live connection was not closed before committed Revoke returned")
+	}
+	devices, readErr := srv.Store.Devices()
+	if readErr != nil || len(devices) != 0 {
+		t.Fatalf("devices after committed revoke = %+v, %v", devices, readErr)
+	}
+	retry, dialErr := connectPhone(t, ctx, hs, srv.Identity, phone, nil)
+	if dialErr == nil {
+		if admissionAccepted(retry, ctx) {
+			t.Fatal("revoked phone reconnected without proof")
+		}
+		_ = retry.ws.Close(websocket.StatusNormalClosure, "")
+	}
+	if retryRemoved, retryErr := srv.Revoke(deviceID); retryRemoved != (state.Device{}) || retryErr == nil || errors.Is(retryErr, state.ErrMutationCommitted) {
+		t.Fatalf("revoke retry result = %+v, %v", retryRemoved, retryErr)
+	}
+	logText := logs.String()
+	for _, want := range []string{"device revocation committed with post-commit diagnostic", deviceID, "closed_connections=1", diagnostic.Error()} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("revocation warning missing %q: %s", want, logText)
+		}
+	}
+}
+
+func TestAdmissionRevalidatesSuccessfullyAfterUnrelatedRevocation(t *testing.T) {
+	var revokeOnce sync.Once
+	revokeResult := make(chan error, 1)
+	unrelated := bytes.Repeat([]byte{0xE1}, 32)
+	hooks := &admissionTestHooks{beforePublish: func(srv *Server) {
+		revokeOnce.Do(func() {
+			_, err := srv.Revoke(protocol.DeviceID(unrelated))
+			revokeResult <- err
+		})
+	}}
+	srv, hs := newTestServerWithHooks(t, hooks)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := srv.Store.AddTrusted(unrelated, "unrelated"); err != nil {
+		t.Fatal(err)
+	}
+	phone, _ := protocol.NewIdentity(nil)
+	deviceID := protocol.DeviceID(phone.Public())
+	code, _, _ := srv.Pairings.Issue(time.Minute)
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(client, ctx) {
+		t.Fatalf("admission did not survive unrelated generation change: %v", err)
+	}
+	if err := receiveTestValue(t, ctx, revokeResult, "unrelated revoke hook"); err != nil {
+		t.Fatal(err)
+	}
+	online := srv.OnlineDevices()
+	if len(online) != 1 || online[0] != deviceID {
+		t.Fatalf("published devices = %v, want %s", online, deviceID)
+	}
+	devices, err := srv.Store.Devices()
+	if err != nil || len(devices) != 1 || devices[0].ID != deviceID {
+		t.Fatalf("trusted devices after revalidation = %+v, %v", devices, err)
+	}
+	_ = client.ws.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestPairingPublicationChurnRejectsAndWarnsPersistedTrust(t *testing.T) {
+	hooks := &admissionTestHooks{beforePublish: func(srv *Server) {
+		srv.mu.Lock()
+		srv.revocationGeneration++
+		srv.mu.Unlock()
+	}}
+	var logs lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv, hs := newTestServerWithHooksAndLogger(t, hooks, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	phone, _ := protocol.NewIdentity(nil)
+	deviceID := protocol.DeviceID(phone.Public())
+	code, _, _ := srv.Pairings.Issue(time.Minute)
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admissionAccepted(client, ctx) {
+		t.Fatal("persistent generation churn admitted phone")
+	}
+	if srv.Pairings.Pending() != 0 {
+		t.Fatal("rejected churn pairing restored its code")
+	}
+	devices, err := srv.Store.Devices()
+	if err != nil || len(devices) != 1 || devices[0].ID != deviceID {
+		t.Fatalf("persisted trust after churn rejection = %+v, %v", devices, err)
+	}
+	logText := logs.String()
+	for _, want := range []string{"pairing admission failed; persisted trust may remain", deviceID, "admission rejected: revocation state kept changing", "persisted_trust_may_remain=true"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("churn warning missing %q: %s", want, logText)
+		}
+	}
+	_ = client.ws.Close(websocket.StatusNormalClosure, "")
+}
+
+func readUntilPhoneClose(client *phoneClient, ctx context.Context) error {
+	for {
+		if _, _, err := client.recv(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func TestRevokeRejectsHandshakePausedBeforePublication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	var decisions atomic.Int32
+	var pauseOnce sync.Once
+	hooks := &admissionTestHooks{afterDecision: func() {
+		if decisions.Add(1) == 2 {
+			pauseOnce.Do(func() { close(paused) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+	}}
+	srv, hs := newTestServerWithHooks(t, hooks)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, _ := srv.Pairings.Issue(time.Minute)
+	first, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(first, ctx) {
+		t.Fatalf("initial pairing failed: %v", err)
+	}
+	_ = first.ws.Close(websocket.StatusNormalClosure, "")
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.ConnectionCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if srv.ConnectionCount() != 0 {
+		t.Fatal("initial connection did not leave before revocation interleaving")
+	}
+
+	second, err := connectPhone(t, ctx, hs, srv.Identity, phone, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiveTestValue(t, ctx, paused, "known-phone admission pause")
+	const observerCount = 24
+	observeStart := make(chan struct{})
+	observed := make(chan struct{}, observerCount)
+	for range observerCount {
+		go func() {
+			<-observeStart
+			_ = srv.OnlineDevices()
+			srv.DisconnectDevice("unrelated-device")
+			observed <- struct{}{}
+		}()
+	}
+	close(observeStart)
+	if _, err := srv.Revoke(protocol.DeviceID(phone.Public())); err != nil {
+		t.Fatal(err)
+	}
+	for range observerCount {
+		receiveTestValue(t, ctx, observed, "finite concurrent observer")
+	}
+	releaseOnce.Do(func() { close(release) })
+	if admissionAccepted(second, ctx) {
+		t.Fatal("handshake survived a completed concurrent revoke")
+	}
+	devices, err := srv.Store.Devices()
+	if err != nil || len(devices) != 0 {
+		t.Fatalf("devices after revoke = %+v, err %v", devices, err)
+	}
+
+	freshCode, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := connectPhone(t, ctx, hs, srv.Identity, phone, freshCode)
+	if err != nil || !admissionAccepted(fresh, ctx) {
+		t.Fatalf("deliberate fresh-code re-pair failed: %v", err)
+	}
+	_ = fresh.ws.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestAdmissionPublicationRejectsPersistentRevocationChurn(t *testing.T) {
+	store, err := state.OpenAt(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close Store: %v", err)
+		}
+	})
+	phone := make([]byte, 32)
+	for i := range phone {
+		phone[i] = 0xD4
+	}
+	if err := store.AddTrusted(phone, "churn"); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{Store: store, conns: map[*conn]struct{}{}}
+	srv.testHooks = &admissionTestHooks{beforePublish: func(srv *Server) {
+		srv.mu.Lock()
+		srv.revocationGeneration++
+		srv.mu.Unlock()
+	}}
+	c := &conn{srv: srv}
+	if err := srv.publishAdmission(c, phone, srv.admissionGeneration()); err == nil {
+		t.Fatal("persistent generation churn did not bound admission publication")
+	}
+	if c.deviceID != "" {
+		t.Fatalf("device published during persistent churn: %s", c.deviceID)
+	}
+}
+
+type blockingCloseLink struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (l *blockingCloseLink) Read(context.Context) (websocket.MessageType, []byte, error) {
+	return 0, nil, errors.New("unused")
+}
+
+func (l *blockingCloseLink) Write(context.Context, websocket.MessageType, []byte) error {
+	return errors.New("unused")
+}
+
+func (l *blockingCloseLink) Close(websocket.StatusCode, string) error {
+	l.once.Do(func() { close(l.started) })
+	<-l.release
+	return nil
+}
+
+func TestDisconnectDeviceDoesNotHoldServerLockWhileClosing(t *testing.T) {
+	link := &blockingCloseLink{started: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(link.release) }) })
+	srv := &Server{conns: map[*conn]struct{}{}}
+	c := &conn{srv: srv, ws: link, deviceID: "phone"}
+	srv.conns[c] = struct{}{}
+	disconnected := make(chan struct{}, 1)
+	go func() {
+		srv.DisconnectDevice("phone")
+		close(disconnected)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	receiveTestValue(t, ctx, link.started, "blocking close")
+	counted := make(chan int, 1)
+	go func() { counted <- srv.ConnectionCount() }()
+	select {
+	case count := <-counted:
+		if count != 1 {
+			t.Fatalf("connection count = %d", count)
+		}
+	case <-time.After(time.Second):
+		releaseOnce.Do(func() { close(link.release) })
+		t.Fatal("ConnectionCount blocked behind websocket Close")
+	}
+	releaseOnce.Do(func() { close(link.release) })
+	receiveTestValue(t, ctx, disconnected, "disconnect completion")
 }
 
 func TestLargeFramesAreChunked(t *testing.T) {
