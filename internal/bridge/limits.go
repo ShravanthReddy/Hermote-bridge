@@ -16,6 +16,12 @@ const (
 	defaultFSListTimeout     = 10 * time.Second
 	defaultFSWarningAfter    = 2 * time.Minute
 	defaultCloseWriteTimeout = 2 * time.Second
+	defaultBlobMaxFileBytes  = int64(256 << 20)
+	defaultBlobReservedBytes = int64(512 << 20)
+	defaultBlobChunkBytes    = 512 << 10
+	defaultBlobProcessWide   = 2
+	defaultBlobIdleTimeout   = 120 * time.Second
+	defaultBlobCommitTimeout = 120 * time.Second
 )
 
 type readDirectory func(string) ([]os.DirEntry, error)
@@ -34,6 +40,13 @@ type bridgeDependencies struct {
 	fsReadDir         readDirectory
 	fsListTimeout     time.Duration
 	fsWarningAfter    time.Duration
+	blobSpoolRoot     string
+	blobMaxFileBytes  int64
+	blobReservedBytes int64
+	blobChunkBytes    int
+	blobProcessWide   int
+	blobIdleTimeout   time.Duration
+	blobCommitTimeout time.Duration
 }
 
 func productionBridgeDependencies() bridgeDependencies {
@@ -48,6 +61,12 @@ func productionBridgeDependencies() bridgeDependencies {
 		fsReadDir:         os.ReadDir,
 		fsListTimeout:     defaultFSListTimeout,
 		fsWarningAfter:    defaultFSWarningAfter,
+		blobMaxFileBytes:  defaultBlobMaxFileBytes,
+		blobReservedBytes: defaultBlobReservedBytes,
+		blobChunkBytes:    defaultBlobChunkBytes,
+		blobProcessWide:   defaultBlobProcessWide,
+		blobIdleTimeout:   defaultBlobIdleTimeout,
+		blobCommitTimeout: defaultBlobCommitTimeout,
 	}
 }
 

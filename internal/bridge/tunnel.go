@@ -21,6 +21,7 @@ import (
 func (c *conn) tunnel(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	defer c.blobs.shutdownAndWait()
 
 	gw, err := c.dialGateway(ctx)
 	if err != nil {
@@ -240,6 +241,8 @@ func (c *conn) dispatch(
 			return nil
 		}
 		return c.terminals.handle(ctx, m)
+	case protocol.ChBlob:
+		return c.blobs.handle(ctx, plain, fail)
 	case protocol.ChConfirm:
 		return errors.New("unexpected confirm after handshake")
 	}
