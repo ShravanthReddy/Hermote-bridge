@@ -49,6 +49,7 @@ type Server struct {
 	deps       bridgeDependencies
 	httpSlots  *workPool
 	fsSlots    *workPool
+	blobs      *blobManager
 	// OnPush receives a phone's push registration (device token, wanted
 	// kinds); nil when push is not wired.
 	OnPush func(deviceID string, reg protocol.PushRegistration)
@@ -70,7 +71,7 @@ func newServer(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	srv := &Server{
 		Identity:   id,
 		Store:      st,
 		Gateway:    gw,
@@ -82,6 +83,12 @@ func newServer(
 		fsSlots:    newWorkPool(deps.fsProcessWide),
 		conns:      map[*conn]struct{}{},
 	}
+	spoolRoot := deps.blobSpoolRoot
+	if spoolRoot == "" && st != nil {
+		spoolRoot = st.Path("attachment-blob-spool-v1")
+	}
+	srv.blobs = newBlobManager(spoolRoot, deps)
+	return srv
 }
 
 // Handler serves /v1/bridge (WebSocket) and /healthz.
@@ -104,6 +111,13 @@ func (s *Server) ConnectionCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+func (s *Server) blobUsageSnapshot() blobUsageSnapshot {
+	if s.blobs == nil {
+		return blobUsageSnapshot{}
+	}
+	return s.blobs.snapshot()
 }
 
 // OnlineDevices lists the device ids with a live connection; they see events
@@ -201,11 +215,13 @@ func (s *Server) serveLink(ctx context.Context, link phoneLink, remote string) {
 }
 
 func (s *Server) newConnection(link phoneLink, remote string) *conn {
-	return &conn{
+	c := &conn{
 		srv: s, ws: link, remote: remote,
 		httpSlots: newWorkPool(s.deps.httpPerConnection),
 		fsSlots:   newWorkPool(s.deps.fsPerConnection),
 	}
+	c.blobs = newBlobConnection(c)
+	return c
 }
 
 func (s *Server) track(c *conn, add bool) {
@@ -230,6 +246,7 @@ type conn struct {
 	closed    sync.Once
 	httpSlots *workPool
 	fsSlots   *workPool
+	blobs     *blobConnection
 	// Shells this phone opened over the tunnel (plan 10 / WP6); nil until the first.
 	terminals *terminalManager
 }
@@ -250,7 +267,19 @@ func (c *conn) run(ctx context.Context) {
 	defer log.Info("phone disconnected")
 	// Tell the phone admission succeeded before the (possibly slow) gateway
 	// dial, so it can distinguish "paired" from "refused".
-	if err := c.sendJSON(ctx, protocol.CtlMessage{Ch: protocol.ChCtl, Op: protocol.CtlAccepted}); err != nil {
+	capabilities := &protocol.Capabilities{}
+	if c.srv.blobs != nil && c.srv.blobs.available() {
+		capabilities.AttachmentBlob = &protocol.AttachmentBlobCapability{
+			Version:      blobProtocolVersion,
+			MaxFileBytes: c.srv.deps.blobMaxFileBytes,
+			ChunkBytes:   c.srv.deps.blobChunkBytes,
+		}
+	}
+	if err := c.sendJSON(ctx, protocol.CtlMessage{
+		Ch:   protocol.ChCtl,
+		Op:   protocol.CtlAccepted,
+		Caps: capabilities,
+	}); err != nil {
 		return
 	}
 
@@ -412,7 +441,11 @@ func (c *conn) sendJSON(ctx context.Context, v any) error {
 // recv reads, decrypts and (if chunked) reassembles the next plaintext message.
 func (c *conn) recv(ctx context.Context, asm *protocol.ChunkAssembler) ([]byte, error) {
 	for {
-		rctx, cancel := context.WithTimeout(ctx, idleTimeout)
+		timeout := idleTimeout
+		if c.blobs != nil {
+			timeout = c.blobs.readTimeout(timeout)
+		}
+		rctx, cancel := context.WithTimeout(ctx, timeout)
 		typ, frame, err := c.ws.Read(rctx)
 		cancel()
 		if err != nil {

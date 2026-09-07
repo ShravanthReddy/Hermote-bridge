@@ -13,6 +13,7 @@ const (
 	ChChunk   = "chunk"   // piece of a large message
 	ChConfirm = "confirm" // handshake completion (first phone→bridge frame only)
 	ChPTY     = "pty"     // a shell on the Mac: open / data / resize / close / exit
+	ChBlob    = "blob"    // bounded attachment upload frames
 )
 
 // PTY operations (plan 10 / WP6). The phone opens a terminal with an id it
@@ -81,12 +82,51 @@ const (
 
 // CtlMessage carries liveness and lifecycle signals.
 type CtlMessage struct {
-	Ch     string `json:"ch"`
-	Op     string `json:"op"`
-	Reason string `json:"reason,omitempty"`
-	State  string `json:"state,omitempty"` // for CtlGateway: "starting" | "ready" | "down"
+	Ch     string        `json:"ch"`
+	Op     string        `json:"op"`
+	Reason string        `json:"reason,omitempty"`
+	State  string        `json:"state,omitempty"` // for CtlGateway: "starting" | "ready" | "down"
+	Caps   *Capabilities `json:"caps,omitempty"`
 	// For CtlPush: how to reach the phone while it is disconnected.
 	Push *PushRegistration `json:"push,omitempty"`
+}
+
+// Capabilities are advertised only in the encrypted admission-accepted
+// control message. They are intentionally absent from the signed handshake.
+type Capabilities struct {
+	AttachmentBlob *AttachmentBlobCapability `json:"attachment_blob,omitempty"`
+}
+
+// AttachmentBlobCapability is version 1 of the bounded upload channel.
+type AttachmentBlobCapability struct {
+	Version      int   `json:"version"`
+	MaxFileBytes int64 `json:"max_file_bytes"`
+	ChunkBytes   int   `json:"chunk_bytes"`
+}
+
+// BlobError is a typed bridge-local or gateway JSON-RPC error. Gateway errors
+// preserve their original code so clients can retain runtime recovery logic.
+type BlobError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Kind    string `json:"kind"`
+}
+
+// BlobMessage is the version 1 attachment upload wire shape. Fields not used
+// by an operation are omitted.
+type BlobMessage struct {
+	Ch         string          `json:"ch"`
+	Op         string          `json:"op"`
+	ID         string          `json:"id"`
+	SessionID  string          `json:"session_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	Size       *int64          `json:"size,omitempty"`
+	SHA256     string          `json:"sha256,omitempty"`
+	Offset     *int64          `json:"offset,omitempty"`
+	ChunkBytes *int            `json:"chunk_bytes,omitempty"`
+	Data       Bytes           `json:"d,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	Error      *BlobError      `json:"error,omitempty"`
 }
 
 // Chunk is one piece of a message larger than ChunkThreshold. Pieces are
@@ -111,7 +151,7 @@ func PeekChannel(plain []byte) (string, error) {
 		return "", err
 	}
 	switch probe.Ch {
-	case ChWS, ChHTTP, ChCtl, ChChunk, ChConfirm, ChPTY:
+	case ChWS, ChHTTP, ChCtl, ChChunk, ChConfirm, ChPTY, ChBlob:
 		return probe.Ch, nil
 	}
 	return "", ErrUnknownChannel
