@@ -1,16 +1,13 @@
 # Hermote Oracle hosting
 
 `Caddyfile.hermote` is the complete configuration for the shared website/relay VM.
-The old sslip.io hostname and `relay.hermote.app` must proxy to the **same** existing
-relay process on `127.0.0.1:8080`. Stored Mac and iOS pairings may still use the old
-hostname. Do not remove it or expose port 8080 publicly. The migration without re-pairing
-works because both names use one session registry; a different relay requires a fresh
-setup code on each phone.
+All configured relay hostnames proxy to the relay process on `127.0.0.1:8080`.
+The public endpoint is `wss://relay.hermote.app`. Keep port 8080 bound to loopback.
 
 `install-vm.sh` is for a fresh VM only. It now refuses when a Caddyfile or relay
 installation already exists, before changing binaries or services. A partial first
 installation also requires manual inspection and recovery; blindly rerunning this
-fresh-provisioning script is intentionally refused. It is not an upgrade command.
+fresh-provisioning script is intentionally refused. Use the deployment steps below for this shared server.
 Do not remove the existing Caddyfile to bypass that guard on this shared VM.
 For application binary updates, separately stage and validate the binary and plan
 the needed relay maintenance; adding a hostname does not require a relay restart.
@@ -42,7 +39,7 @@ the needed relay maintenance; adding a hostname does not require a relay restart
    phone reconnect without a pairing code. Verify the relay process start time is unchanged.
 7. Verify the apex, `/privacy`, `/privacy/` redirect, asset URLs, missing-route 404, and `www` redirect
    through public HTTPS. Explicit relay acceptance: `curl -fsS https://relay.hermote.app/healthz`
-   and the equivalent legacy URL must succeed without certificate bypass. For website-only content updates, atomically switch the
+   and each configured relay hostname must succeed without certificate bypass. For website-only content updates, atomically switch the
    symlink without reloading Caddy, so relay sockets are unaffected.
 
 ## Rollback

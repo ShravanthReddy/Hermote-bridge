@@ -5,10 +5,9 @@
 # Downloads a release, verifies its SHA-256, stages the canonical executable,
 # and uses a controlling terminal for interactive macOS setup when one exists.
 #
-# Options (new names take precedence over compatibility names):
+# Options:
 #   HERMOTE_BRIDGE_VERSION=vX.Y.Z  HERMOTE_BRIDGE_NO_UP=1
 #   HERMOTE_BRIDGE_REPO=owner/repo HERMOTE_BRIDGE_INSTALL_DIR=/absolute/path
-#   HERMES_REMOTE_VERSION / HERMES_REMOTE_NO_UP / HERMES_REMOTE_REPO (legacy)
 set -euo pipefail
 
 REPO="${HERMOTE_BRIDGE_REPO:-${HERMES_REMOTE_REPO:-ShravanthReddy/Hermote-bridge}}"
@@ -68,7 +67,7 @@ if ! curl -fsSL -o "$tmp/$asset" "$base/$asset"; then
         die "canonical release asset is missing: $base/$asset"
     fi
     legacy_asset="${LEGACY_BIN}_${version}_${os}_${asset_arch}.tar.gz"
-    warn "Pinned release $tag predates the rename; using its legacy archive name."
+    warn "Using the archive published for pinned release $tag."
     curl -fsSL -o "$tmp/$legacy_asset" "$base/$legacy_asset" || die "download failed: $base/$legacy_asset"
     asset="$legacy_asset"
     archive_binary="$LEGACY_BIN"
@@ -153,7 +152,6 @@ fi
 legacy="$dest/$LEGACY_BIN"
 if [[ ! -e "$legacy" && ! -L "$legacy" ]]; then
     ln -s "$BIN" "$legacy"
-    say "Compatibility command: $legacy → $BIN"
 elif [[ -L "$legacy" && "$(readlink "$legacy")" == "$BIN" ]]; then
     :
 elif [[ "$setup_completed" == 1 && -f "$legacy" && -x "$legacy" ]]; then
@@ -162,9 +160,8 @@ elif [[ "$setup_completed" == 1 && -f "$legacy" && -x "$legacy" ]]; then
         alias_stage="$dest/.${LEGACY_BIN}.alias.$$"
         ln -s "$BIN" "$alias_stage"
         mv -f "$alias_stage" "$legacy"
-        say "Migrated compatibility command: $legacy → $BIN"
     else
-        warn "Preserved existing $legacy; it was not recognized as the previous bridge executable."
+        warn "Preserved existing $legacy; it was not replaced. Use $dest/$BIN to start Hermote."
     fi
 else
     warn "Preserved existing $legacy; it was not replaced. Use $dest/$BIN as the canonical command."
