@@ -18,7 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 // Limits are the abuse controls (docs/REMOTE-ACCESS.md §6).
@@ -101,8 +101,7 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// ── per-IP connection rate ──────────────────────────────────────────────────
-
+// ipWindow tracks the per-IP connection rate.
 type ipWindow struct {
 	start time.Time
 	count int
@@ -139,8 +138,7 @@ func (s *Server) allowIP(ip string) bool {
 	return w.count <= s.Limits.ConnectionsPerIPPerMinute
 }
 
-// ── sessions ────────────────────────────────────────────────────────────────
-
+// session connects one bridge to its paired phone tunnels.
 type session struct {
 	id     string
 	bridge *websocket.Conn
@@ -179,8 +177,6 @@ func (sess *session) control(ctx context.Context, c protocol.RelayControl) error
 	raw, _ := json.Marshal(c)
 	return sess.writeBridge(ctx, protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
 }
-
-// ── bridge side ─────────────────────────────────────────────────────────────
 
 func (s *Server) serveBridge(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
@@ -314,8 +310,6 @@ func (sess *session) closeAllPhones() {
 	}
 }
 
-// ── phone side ──────────────────────────────────────────────────────────────
-
 func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	if !s.allowIP(ip) {
@@ -403,8 +397,7 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ── token bucket ────────────────────────────────────────────────────────────
-
+// bucket limits traffic with a token bucket.
 type bucket struct {
 	mu     sync.Mutex
 	tokens float64

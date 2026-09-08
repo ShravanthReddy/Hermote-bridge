@@ -10,10 +10,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/bridge"
-	"github.com/ShravanthReddy/hermes-remote/internal/control"
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
-	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/bridge"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/control"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
 )
 
 // cmdSelftest pairs a throw-away in-process "phone" with the running daemon

@@ -3,7 +3,7 @@
 #   export RELAY_DOMAIN=relay.example.com
 #   docker compose -f deploy/relay/compose.yaml up -d
 #
-# Then on each Mac:  hermes-remote up --transport relay --relay wss://relay.example.com
+# Then on each Mac:  hermote-bridge up --transport relay --relay wss://relay.example.com
 #
 # The relay keeps nothing on disk and sees only ciphertext; Caddy's data volume
 # holds the TLS certificates. Logs (stdout, JSON) carry timestamps, client IPs,

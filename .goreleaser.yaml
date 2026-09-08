@@ -1,11 +1,11 @@
-# GoReleaser config for hermes-remote (published from the public mirror repo).
+# GoReleaser config for hermote-bridge (published from the public mirror repo).
 # Release: tag `vX.Y.Z` on the mirror, then `goreleaser release --clean`.
 # Signing/notarization (Developer ID) is added once the certificate exists;
 # curl-installed and brew-installed binaries carry no quarantine flag, so
 # unsigned builds run today.
 version: 2
 
-project_name: hermes-remote
+project_name: hermote-bridge
 
 before:
   hooks:
@@ -13,9 +13,9 @@ before:
     - go test ./...
 
 builds:
-  - id: hermes-remote
-    main: ./cmd/hermes-remote
-    binary: hermes-remote
+  - id: hermote-bridge
+    main: ./cmd/hermote-bridge
+    binary: hermote-bridge
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags:
@@ -33,14 +33,14 @@ builds:
     goarch: [arm64, amd64]
 
 universal_binaries:
-  - id: hermes-remote-universal
-    ids: [hermes-remote]
+  - id: hermote-bridge-universal
+    ids: [hermote-bridge]
     replace: true
-    name_template: hermes-remote
+    name_template: hermote-bridge
 
 archives:
   - id: default
-    ids: [hermes-remote-universal, hermes-remote]
+    ids: [hermote-bridge-universal, hermote-bridge]
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "all" }}universal{{ else }}{{ .Arch }}{{ end }}
@@ -68,21 +68,8 @@ release:
   footer: |
     Install or update:
 
-        curl -fsSL https://raw.githubusercontent.com/{{ .Env.GITHUB_OWNER }}/hermes-remote/main/install.sh | bash
+        curl -fsSL https://raw.githubusercontent.com/{{ .Env.GITHUB_OWNER }}/Hermote-bridge/main/install.sh | bash
 
-brews:
-  - name: hermes-remote
-    ids: [default] # the CLI archives only; relay archives are Linux-only server builds
-    repository:
-      owner: "{{ .Env.GITHUB_OWNER }}"
-      name: homebrew-hermes
-    homepage: https://github.com/{{ .Env.GITHUB_OWNER }}/hermes-remote
-    description: Pair the Hermes iPhone app with the Mac that runs Hermes
-    license: MIT
-    install: |
-      bin.install "hermes-remote"
-    caveats: |
-      Start the bridge and show the pairing QR code:
-        hermes-remote up
-    test: |
-      system "#{bin}/hermes-remote", "version"
+# Homebrew publication is intentionally separate. The one-time formula rename
+# also deletes the old formula and writes formula_renames.json, which GoReleaser
+# cannot publish as one reviewed tap migration commit.

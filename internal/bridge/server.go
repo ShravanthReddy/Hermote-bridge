@@ -15,9 +15,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
-	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/gateway"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
 )
 
 const (
@@ -234,8 +234,7 @@ func (s *Server) track(c *conn, add bool) {
 	}
 }
 
-// ── One phone connection ────────────────────────────────────────────────────
-
+// conn is one phone connection.
 type conn struct {
 	srv       *Server
 	ws        phoneLink
@@ -247,7 +246,7 @@ type conn struct {
 	httpSlots *workPool
 	fsSlots   *workPool
 	blobs     *blobConnection
-	// Shells this phone opened over the tunnel (plan 10 / WP6); nil until the first.
+	// Shells this phone opened over the tunnel; nil until the first.
 	terminals *terminalManager
 }
 

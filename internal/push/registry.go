@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 // Registration is one phone's push details, keyed by its device id.

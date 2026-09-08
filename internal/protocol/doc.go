@@ -1,4 +1,4 @@
-// Package protocol implements the hermes-remote wire protocol shared by the
+// Package protocol implements the Hermote bridge wire protocol shared by the
 // bridge, the relay and (as golden test vectors) the iOS client:
 //
 //   - identities: Ed25519 key pairs for the bridge and each phone, and the

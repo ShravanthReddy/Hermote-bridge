@@ -42,9 +42,8 @@ type Options struct {
 	StartTimeout time.Duration
 	// ProbeInterval is how often a ready child is asked whether it still
 	// answers (default 15 s); ProbeFailures consecutive misses (default 3)
-	// end it so the restart loop brings a fresh one up. A gateway whose event
-	// loop has stalled stays alive as a process while every dial times out —
-	// exit alone would never catch it (incident 2026-09-03).
+	// end it so the restart loop brings a fresh one up. A stalled gateway can
+	// stay alive while every dial times out, so probes force a restart.
 	ProbeInterval time.Duration
 	// StopGrace is how long Stop waits after SIGINT before SIGKILL (default 5s).
 	StopGrace     time.Duration
@@ -212,7 +211,7 @@ func (s *Supervisor) Stop() {
 		_ = cmd.Process.Signal(os.Interrupt)
 	}
 	// A child that ignores SIGINT (a wedged interpreter) would otherwise hang
-	// `hermes-remote stop` and launchd's unload forever.
+	// `hermote-bridge stop` and launchd's unload forever.
 	select {
 	case <-s.done:
 	case <-time.After(s.opts.StopGrace):

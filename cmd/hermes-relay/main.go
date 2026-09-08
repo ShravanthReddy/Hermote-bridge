@@ -1,4 +1,4 @@
-// hermes-relay: the stateless meeting point for hermes-remote bridges and
+// hermes-relay: the stateless meeting point for hermote-bridge bridges and
 // phones that cannot reach each other directly. Run behind a TLS terminator
 // (Caddy) — see relay/README in the repo for the compose file.
 package main
@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/relay"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/relay"
 )
 
 var version = "dev"

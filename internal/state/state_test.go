@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 func testPhoneID(n byte) []byte { return bytes.Repeat([]byte{n}, 32) }

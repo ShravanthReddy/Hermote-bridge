@@ -99,8 +99,7 @@ func newNonce(rng io.Reader) ([]byte, error) {
 	return n, err
 }
 
-// ── Phone side ──────────────────────────────────────────────────────────────
-// Implemented here so the Go tests generate the golden vectors the Swift
+// The phone side is implemented here so Go tests generate the golden vectors the Swift
 // client is checked against; the iOS app has its own CryptoKit implementation.
 
 // PhoneState holds the phone's handshake secrets between Hello and Confirm.
@@ -164,8 +163,6 @@ func (p *PhoneState) Finish(a Accept, bridgeID []byte, code []byte) (confirmFram
 	}
 	return confirmFrame, suite, nil
 }
-
-// ── Bridge side ─────────────────────────────────────────────────────────────
 
 // Pending holds the bridge's handshake secrets between Accept and Confirm.
 type Pending struct {
