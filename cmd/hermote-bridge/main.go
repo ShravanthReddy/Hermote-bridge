@@ -53,8 +53,7 @@ Transports:
 `
 
 // hostedRelayURL is the relay run for Hermote (see docs/REMOTE-ACCESS.md §6).
-// The legacy sslip.io endpoint remains live for existing pairings. Stored relay
-// URLs are sticky, so this default only applies without a saved relay URL.
+// Setup uses this endpoint when no relay URL has been configured.
 const hostedRelayURL = "wss://relay.hermote.app"
 
 func main() {
@@ -277,10 +276,8 @@ func cmdUp(args []string) error {
 		return fmt.Errorf("%w — LaunchAgent state was rolled back; this does not replace the executable at its configured path", err)
 	}
 	installation.Commit()
-	if migrated, migrationErr := migrateLegacyCommand(bin); migrationErr != nil {
-		warn("Bridge is ready, but the hermes-remote compatibility command was not migrated: %v", migrationErr)
-	} else if migrated {
-		ok("Compatibility command: %s → hermote-bridge", filepath.Join(filepath.Dir(bin), "hermes-remote"))
+	if _, commandErr := migrateLegacyCommand(bin); commandErr != nil {
+		warn("Bridge is ready. Optional command setup could not finish: %v", commandErr)
 	}
 	ok("Bridge running (LaunchAgent %s), Hermes gateway %s on 127.0.0.1:%d", launchd.Label, st.Gateway, st.GatewayPort)
 

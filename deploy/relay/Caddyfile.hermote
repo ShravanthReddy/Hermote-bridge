@@ -1,4 +1,4 @@
-# Shared Oracle VM: keep the legacy relay host for existing stored pairings.
+# Shared Oracle VM: explicit relay hosts and static website routing.
 129-213-134-110.sslip.io, relay.hermote.app {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080

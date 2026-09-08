@@ -66,10 +66,8 @@ release:
   draft: false
   prerelease: auto
   footer: |
-    Install or update:
+    Install the bridge:
 
         curl -fsSL https://raw.githubusercontent.com/{{ .Env.GITHUB_OWNER }}/Hermote-bridge/main/install.sh | bash
 
-# Homebrew publication is intentionally separate. The one-time formula rename
-# also deletes the old formula and writes formula_renames.json, which GoReleaser
-# cannot publish as one reviewed tap migration commit.
+# Homebrew publication follows verification of the release assets.
