@@ -53,9 +53,9 @@ Transports:
 `
 
 // hostedRelayURL is the relay run for Hermote (see docs/REMOTE-ACCESS.md §6).
-// Interim sslip.io name until a domain is chosen; pairings bake the URL in, so a
-// change means phones re-pair.
-const hostedRelayURL = "wss://129-213-134-110.sslip.io"
+// The legacy sslip.io endpoint remains live for existing pairings. Stored relay
+// URLs are sticky, so this default only applies without a saved relay URL.
+const hostedRelayURL = "wss://relay.hermote.app"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
