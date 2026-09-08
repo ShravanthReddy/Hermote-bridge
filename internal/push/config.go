@@ -1,7 +1,7 @@
 // Package push notifies paired phones through APNs while they are not
 // connected to the bridge: a watcher polls the gateway for the moments that
 // need a person (approvals, questions, finished turns) and a token-auth APNs
-// client delivers them. Nothing here runs unless `hermes-remote push setup`
+// client delivers them. Nothing here runs unless `hermote-bridge push setup`
 // has stored an APNs key.
 package push
 
@@ -14,7 +14,7 @@ import (
 )
 
 // ErrNotConfigured means no APNs key has been set up on this Mac.
-var ErrNotConfigured = errors.New("push not configured — run `hermes-remote push setup`")
+var ErrNotConfigured = errors.New("push not configured — run `hermote-bridge push setup`")
 
 // Config is push.json in the state directory.
 type Config struct {

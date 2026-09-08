@@ -10,7 +10,7 @@ import (
 
 // RefusedRouteError is the JSON body the bridge returns (HTTP 403) for a REST
 // route outside the allow-list. HermesKit matches it verbatim to tell the user
-// their hermes-remote is older than the app (docs/REMOTE-ACCESS.md §7).
+// their hermote-bridge is older than the app (docs/REMOTE-ACCESS.md §7).
 const RefusedRouteError = `{"error":"path not allowed through the bridge"}`
 
 const MalformedRequestError = `{"error":"malformed bridge request"}`
@@ -108,8 +108,7 @@ var allowedRoutes = []route{
 	{http.MethodGet, "/api/memory"},
 	{http.MethodPost, "/api/memory/"},
 	{http.MethodGet, "/api/memory/"},
-	// Memory providers (plan 10 / WP8): a provider's settings form is saved
-	// with PUT; POST runs its package install on the Mac.
+	// Memory providers save settings with PUT; POST installs their packages.
 	{http.MethodPut, "/api/memory/providers/"},
 	{http.MethodPost, "/api/memory/providers/"},
 	{http.MethodGet, "/api/learning/"},
@@ -122,8 +121,8 @@ var allowedRoutes = []route{
 	{http.MethodPost, "/api/curator/"},
 	{http.MethodPut, "/api/curator/"},
 
-	// Operations and analytics (plan 10 / WP4): spawned actions are tailed
-	// through /api/actions/<name>/status; a finished backup is fetched from
+	// Operations and analytics: tail actions through /api/actions/<name>/status;
+	// fetch a finished backup from
 	// /api/ops/backup/download.
 	{http.MethodPost, "/api/ops/"},
 	{http.MethodGet, "/api/ops/"},

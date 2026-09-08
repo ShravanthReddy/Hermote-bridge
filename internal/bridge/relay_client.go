@@ -12,7 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 // RelayDialer keeps one multiplexed WebSocket to the relay (docs/REMOTE-ACCESS.md
@@ -159,10 +159,8 @@ func (d *RelayDialer) runOnce(ctx context.Context) error {
 	}
 }
 
-// relayKeepalive is well inside the relay's idle timeout (100s): the relay
-// closes a bridge that sends nothing for that long, and an idle bridge sent
-// nothing — the attachment dropped every 101s all day (2026-09-03), taking
-// every phone tunnel with it.
+// relayKeepalive keeps the relay connection alive within its 100 s idle
+// timeout; without it, an idle bridge would lose every phone tunnel.
 const relayKeepalive = 30 * time.Second
 
 // relayKeepaliveFrame is a control message the relay reads and ignores; the

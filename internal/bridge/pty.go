@@ -13,13 +13,13 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
-// Terminals over the tunnel (plan 10 / WP6, ADR-028). Each phone connection
-// owns the shells it opened; they die with the connection. The shell is the
-// user's login shell in the requested folder, with a sane TERM, so the phone
-// sees exactly what a Terminal window on the Mac would.
+// Terminals over the tunnel. Each phone connection owns the shells it opened;
+// they die with the connection. The shell is the user's login shell in the
+// requested folder, with a sane TERM, so the phone sees exactly what a
+// Terminal window on the Mac would.
 
 const (
 	maxTerminals   = 8

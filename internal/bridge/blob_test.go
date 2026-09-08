@@ -22,9 +22,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
-	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/gateway"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
 )
 
 type blobGatewayRequest struct {

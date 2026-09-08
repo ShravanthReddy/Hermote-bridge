@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 func TestPairingConsumeIsAtomicAndSingleUse(t *testing.T) {

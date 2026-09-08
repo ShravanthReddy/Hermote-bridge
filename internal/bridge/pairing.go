@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 // pairings tracks outstanding one-time pairing codes.

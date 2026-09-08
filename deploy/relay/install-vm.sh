@@ -18,7 +18,7 @@ id -u hermes-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --she
 
 cat >/etc/systemd/system/hermes-relay.service <<'EOF'
 [Unit]
-Description=hermes-relay (Hermes iPhone app relay)
+Description=hermes-relay (Hermote iPhone app relay)
 After=network-online.target
 Wants=network-online.target
 

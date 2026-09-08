@@ -109,7 +109,7 @@ func (c *CLI) ServeOn(ctx context.Context, httpsPort int, target string) error {
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if strings.Contains(strings.ToLower(msg), "https") || strings.Contains(strings.ToLower(msg), "cert") || strings.Contains(msg, "MagicDNS") {
-			return fmt.Errorf("%s\n\nTailscale needs HTTPS certificates for your tailnet: open https://login.tailscale.com/admin/dns, enable MagicDNS and HTTPS Certificates, then run `hermes-remote up` again", msg)
+			return fmt.Errorf("%s\n\nTailscale needs HTTPS certificates for your tailnet: open https://login.tailscale.com/admin/dns, enable MagicDNS and HTTPS Certificates, then run `hermote-bridge up` again", msg)
 		}
 		return fmt.Errorf("tailscale serve: %s", msg)
 	}

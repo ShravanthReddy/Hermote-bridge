@@ -16,9 +16,9 @@ const (
 	ChBlob    = "blob"    // bounded attachment upload frames
 )
 
-// PTY operations (plan 10 / WP6). The phone opens a terminal with an id it
-// chooses; bytes flow both ways as "data"; the bridge reports "exit" when the
-// shell ends and "close" when it refuses or tears one down.
+// PTY operations. The phone opens a terminal with an id it chooses; bytes flow
+// both ways as "data"; the bridge reports "exit" when the shell ends and
+// "close" when it refuses or tears one down.
 const (
 	PTYOpen   = "open"
 	PTYData   = "data"

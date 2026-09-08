@@ -12,8 +12,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
-	"github.com/ShravanthReddy/hermes-remote/internal/relay"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/relay"
 )
 
 // The phone side only differs from the direct test by the URL it dials: the

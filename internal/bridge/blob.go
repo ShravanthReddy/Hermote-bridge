@@ -19,7 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 const (

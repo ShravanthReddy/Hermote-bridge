@@ -6,21 +6,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/launchd"
-	"github.com/ShravanthReddy/hermes-remote/internal/push"
-	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/launchd"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/push"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
 )
 
-const pushUsage = `hermes-remote push — notify paired phones while they are away
+const pushUsage = `hermote-bridge push — notify paired phones while they are away
 
   push setup --team-id TEAM --key-id KEY --p8 AuthKey_KEY.p8 [--bundle-id ID]
       Store an APNs authentication key (Certificates, Identifiers & Profiles ▸ Keys,
       with "Apple Push Notifications service" enabled). Copies the key into the
-      hermes-remote state directory and restarts the daemon.
+      hermote-bridge state directory and restarts the daemon.
   push status   Show the key in use and the phones registered for notifications.
   push test     Send a test notification to every registered phone.
 `
@@ -81,8 +80,18 @@ func cmdPushSetup(args []string) error {
 	ok("APNs key %s for team %s stored at %s", cfg.KeyID, cfg.TeamID, dest)
 	ok("Notifications go to %s", cfg.BundleID)
 	fmt.Println("  Restarting the daemon so the watcher starts…")
-	if err := withCtxRestart(); err != nil {
-		warn("restart failed (%v) — run `hermes-remote restart`", err)
+	// Restart an installed LaunchAgent; leave a manually run daemon alone.
+	plistPath, err := launchd.PlistPath()
+	if err == nil {
+		_, err = os.Stat(plistPath)
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		} else if err == nil {
+			err = withCtx(launchd.Restart)
+		}
+	}
+	if err != nil {
+		warn("restart failed (%v) — run `hermote-bridge restart`", err)
 	}
 	return nil
 }
@@ -96,7 +105,7 @@ func cmdPushStatus() error {
 	cfg, err := push.LoadConfig(store.Path(""))
 	switch {
 	case errors.Is(err, push.ErrNotConfigured):
-		warn("No APNs key — run `hermes-remote push setup`")
+		warn("No APNs key — run `hermote-bridge push setup`")
 	case err != nil:
 		return err
 	default:
@@ -161,13 +170,4 @@ func short8(id string) string {
 		return id[:8]
 	}
 	return id
-}
-
-// withCtxRestart restarts the LaunchAgent when it is installed; a daemon run
-// by hand is left alone.
-func withCtxRestart() error {
-	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "ai.hermes.remote.plist")); err != nil {
-		return nil
-	}
-	return withCtx(launchd.Restart)
 }

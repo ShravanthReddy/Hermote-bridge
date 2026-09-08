@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/bridge"
-	"github.com/ShravanthReddy/hermes-remote/internal/control"
-	"github.com/ShravanthReddy/hermes-remote/internal/gateway"
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
-	"github.com/ShravanthReddy/hermes-remote/internal/push"
-	"github.com/ShravanthReddy/hermes-remote/internal/state"
-	"github.com/ShravanthReddy/hermes-remote/internal/tailscale"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/bridge"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/control"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/gateway"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/push"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/tailscale"
 )
 
 // daemon is the long-running process launchd keeps alive: gateway supervisor,
@@ -34,6 +35,7 @@ type daemon struct {
 	relay     *bridge.RelayDialer // relay transport only
 	log       *slog.Logger
 	startedAt time.Time
+	launchID  string
 
 	mu        sync.Mutex
 	publicURL string
@@ -41,6 +43,11 @@ type daemon struct {
 }
 
 func runDaemon(args []string) error {
+	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	launchID := flags.String("launch-id", "", "launch generation supplied by the service manager")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
 	slog.SetDefault(log)
 
@@ -53,7 +60,7 @@ func runDaemon(args []string) error {
 		return err
 	}
 	if cfg.Python == "" || cfg.BridgePort == 0 {
-		return errors.New("not configured — run `hermes-remote up` first")
+		return errors.New("not configured — run `hermote-bridge up` on macOS or create config.json for manual foreground use")
 	}
 	id, err := store.Identity()
 	if err != nil {
@@ -67,7 +74,7 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
-	d := &daemon{store: store, id: id, cfg: cfg, sup: sup, log: log, startedAt: time.Now().UTC()}
+	d := &daemon{store: store, id: id, cfg: cfg, sup: sup, log: log, startedAt: time.Now().UTC(), launchID: *launchID}
 	d.srv = bridge.New(id, store, sup, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -157,7 +164,7 @@ func (d *daemon) startPush(ctx context.Context, wg *sync.WaitGroup) error {
 }
 
 func logLevel() slog.Level {
-	if os.Getenv("HERMES_REMOTE_DEBUG") != "" {
+	if os.Getenv("HERMOTE_BRIDGE_DEBUG") != "" || os.Getenv("HERMES_REMOTE_DEBUG") != "" {
 		return slog.LevelDebug
 	}
 	return slog.LevelInfo
@@ -196,6 +203,7 @@ func (d *daemon) Status(ctx context.Context) control.Status {
 	port, _ := d.sup.Port()
 	devices, _ := d.store.Devices()
 	s := control.Status{
+		LaunchID:    d.launchID,
 		SessionID:   d.id.SessionID(),
 		Transport:   string(d.cfg.Transport),
 		Name:        d.cfg.Name,

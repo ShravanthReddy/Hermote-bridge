@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 func writeTestKey(t *testing.T, dir string) (string, *ecdsa.PrivateKey) {

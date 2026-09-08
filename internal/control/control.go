@@ -1,4 +1,4 @@
-// Package control is the local admin API between the hermes-remote CLI and
+// Package control is the local admin API between the hermote-bridge CLI and
 // the running daemon: a small HTTP API over a unix socket in the state
 // directory (0600), never exposed on any TCP port.
 package control
@@ -15,11 +15,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/state"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
 )
 
-// Status is what `hermes-remote status` shows.
+// Status is what `hermote-bridge status` shows.
 type Status struct {
+	LaunchID    string            `json:"launch_id,omitempty"`
 	SessionID   string            `json:"session_id"`
 	Transport   string            `json:"transport"`
 	Name        string            `json:"name"`
@@ -56,6 +57,26 @@ func Serve(ctx context.Context, socketPath string, b Backend) error {
 	if err != nil {
 		return err
 	}
+	// UnixListener otherwise unlinks socketPath when it closes, even if a
+	// replacement daemon has already bound a new socket at the same path.
+	if unixListener, ok := l.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
+	socketInfo, err := os.Lstat(socketPath)
+	if err != nil {
+		_ = l.Close()
+		return err
+	}
+	removeOwnedSocket := func() {
+		current, statErr := os.Lstat(socketPath)
+		if statErr == nil && os.SameFile(socketInfo, current) {
+			_ = os.Remove(socketPath)
+		}
+	}
+	defer func() {
+		_ = l.Close()
+		removeOwnedSocket()
+	}()
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		return err
 	}
@@ -85,7 +106,6 @@ func Serve(ctx context.Context, socketPath string, b Backend) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
-		_ = os.Remove(socketPath)
 	}()
 	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -115,20 +135,20 @@ func NewClient(socketPath string) *Client {
 	}}
 }
 
+// CloseIdleConnections prevents a response from an exiting daemon generation
+// from pinning later readiness polls to its already-open Unix connection.
+func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
+
 // ErrNotRunning means the daemon's socket is not answering.
-var ErrNotRunning = errors.New("hermes-remote is not running (start it with: hermes-remote up)")
+var ErrNotRunning = errors.New("hermote-bridge is not running (start it with: hermote-bridge up)")
 
 func (c *Client) do(ctx context.Context, method, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, "http://hermes-remote"+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, "http://hermote-bridge"+path, nil)
 	if err != nil {
 		return err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		var ne *net.OpError
-		if errors.As(err, &ne) || errors.Is(err, os.ErrNotExist) {
-			return ErrNotRunning
-		}
 		return ErrNotRunning
 	}
 	defer resp.Body.Close()

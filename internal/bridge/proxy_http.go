@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 const gatewayResponseLimitDetail = "gateway response exceeds the bridge limit"

@@ -1,4 +1,4 @@
-module github.com/ShravanthReddy/hermes-remote
+module github.com/ShravanthReddy/Hermote-bridge
 
 go 1.27.1
 

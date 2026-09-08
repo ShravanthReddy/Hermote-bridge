@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 // recorder collects the frames a terminal manager sends to the "phone".

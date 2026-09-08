@@ -1,4 +1,4 @@
-// Package state persists hermes-remote's small on-disk state under
+// Package state persists hermote-bridge's small on-disk state under
 // $HERMES_HOME/remote (default ~/.hermes/remote): the bridge identity, the
 // trusted phones and the chosen configuration. Everything is 0600/0700.
 package state
@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ShravanthReddy/hermes-remote/internal/protocol"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 )
 
 const defaultLockTimeout = 5 * time.Second

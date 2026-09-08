@@ -14,12 +14,10 @@ import (
 	"time"
 )
 
-// Directory listings are answered by the daemon, not proxied to the gateway.
-// The gateway's `/api/fs/list` reads the directory synchronously on its event
-// loop, and on a Mac with Desktop & Documents in iCloud a dataless folder
-// blocks that read for 15 s or more — every other request froze with it and
-// the watchdog then ended the child (2026-09-03). Here each listing runs on
-// its own goroutine with a deadline: a slow folder fails alone, in time.
+// Directory listings run in the daemon instead of the gateway: a dataless
+// iCloud folder can block the gateway event loop and freeze other requests.
+// Each listing runs in its own goroutine with a deadline, so a slow folder
+// fails alone.
 //
 // The response mirrors the gateway's exactly ({entries:[{name,path,
 // isDirectory}], error?}) so the phone needs no change.
