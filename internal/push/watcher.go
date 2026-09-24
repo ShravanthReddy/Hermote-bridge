@@ -139,7 +139,12 @@ type Watcher struct {
 	Registry *Registry
 	// Online lists device ids currently connected to the bridge; those
 	// phones see events live and get no push.
-	Online   func() []string
+	Online func() []string
+	// Trusted lists the device ids still paired with this Mac. A
+	// registration outside it (revoked, possibly while the daemon was down)
+	// is dropped instead of pushed; a read failure sends nothing. Nil skips
+	// the check.
+	Trusted  func() (map[string]bool, error)
 	Interval time.Duration
 	Logger   *slog.Logger
 
@@ -234,7 +239,20 @@ func (w *Watcher) eventsSince(ctx context.Context, sessionID string, lastSeen in
 }
 
 func (w *Watcher) deliver(ctx context.Context, offline []Entry, alert Alert) {
+	var trusted map[string]bool
+	if w.Trusted != nil {
+		var err error
+		if trusted, err = w.Trusted(); err != nil {
+			w.log().Warn("push skipped: paired devices unreadable", "kind", alert.Kind, "err", err)
+			return
+		}
+	}
 	for _, entry := range offline {
+		if trusted != nil && !trusted[entry.DeviceID] {
+			w.log().Info("push registration of unpaired device; dropping", "device", short(entry.DeviceID))
+			_ = w.Registry.Remove(entry.DeviceID)
+			continue
+		}
 		if !entry.Wants(alert.Kind) {
 			continue
 		}

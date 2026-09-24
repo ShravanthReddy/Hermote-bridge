@@ -33,6 +33,7 @@ type daemon struct {
 	sup       *gateway.Supervisor
 	srv       *bridge.Server
 	relay     *bridge.RelayDialer // relay transport only
+	pushes    *push.Registry      // nil until startPush
 	log       *slog.Logger
 	startedAt time.Time
 	launchID  string
@@ -135,6 +136,7 @@ func (d *daemon) startPush(ctx context.Context, wg *sync.WaitGroup) error {
 	if err != nil {
 		return err
 	}
+	d.pushes = registry
 	d.srv.OnPush = func(deviceID string, reg protocol.PushRegistration) {
 		if err := registry.Set(deviceID, reg, time.Now().UTC()); err != nil {
 			d.log.Warn("push registration not saved", "err", err)
@@ -155,12 +157,26 @@ func (d *daemon) startPush(ctx context.Context, wg *sync.WaitGroup) error {
 		Sender:   client,
 		Registry: registry,
 		Online:   d.srv.OnlineDevices,
+		Trusted:  d.pairedDeviceIDs,
 		Logger:   d.log,
 	}
 	wg.Add(1)
 	go func() { defer wg.Done(); watcher.Run(ctx) }()
 	d.log.Info("push watcher running", "bundle", cfg.BundleID, "key", cfg.KeyID)
 	return nil
+}
+
+// pairedDeviceIDs reads the trusted-device list without touching last_seen.
+func (d *daemon) pairedDeviceIDs() (map[string]bool, error) {
+	devices, err := d.store.Devices()
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool, len(devices))
+	for _, dev := range devices {
+		ids[dev.ID] = true
+	}
+	return ids, nil
 }
 
 func logLevel() slog.Level {
@@ -260,5 +276,10 @@ func (d *daemon) Revoke(_ context.Context, idOrPrefix string) (state.Device, err
 		return state.Device{}, err
 	}
 	d.log.Info("device revoked", "device", dev.ID)
+	if d.pushes != nil {
+		if err := d.pushes.Remove(dev.ID); err != nil {
+			d.log.Warn("revoked device's push registration not removed", "device", dev.ID, "err", err)
+		}
+	}
 	return dev, nil
 }
