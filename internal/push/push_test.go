@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -309,5 +310,69 @@ func TestConfigValidatesAppleIdentifiers(t *testing.T) {
 	loaded, err := LoadConfig(dir)
 	if err != nil || loaded != good {
 		t.Fatalf("round trip: %+v %v", loaded, err)
+	}
+}
+
+func TestWatcherDropsRegistrationsOfUnpairedDevices(t *testing.T) {
+	registry, err := OpenRegistry(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	_ = registry.Set("phone-paired", protocol.PushRegistration{Token: "tok1", Environment: "sandbox", Kinds: []string{"approval"}}, now)
+	_ = registry.Set("phone-revoked", protocol.PushRegistration{Token: "tok2", Environment: "sandbox", Kinds: []string{"approval"}}, now)
+	gateway := &fakeGateway{
+		active: `{"sessions":[{"id":"s1","title":"Notes"}]}`,
+		events: map[string]string{"s1": `{"events":[{"type":"approval.request","session_id":"s1","payload":{"command":"old"},"seq":3}]}`},
+	}
+	sender := &fakeSender{}
+	w := &Watcher{
+		Gateway: gateway, Sender: sender, Registry: registry,
+		Trusted: func() (map[string]bool, error) { return map[string]bool{"phone-paired": true}, nil },
+	}
+	if err := w.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gateway.events["s1"] = `{"events":[{"type":"approval.request","session_id":"s1","payload":{"command":"rm -rf build"},"seq":4}]}`
+	if err := w.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(sender.sent, ",") != "tok1:approval" {
+		t.Fatalf("sent %v, want only the paired phone", sender.sent)
+	}
+	for _, entry := range registry.All() {
+		if entry.DeviceID == "phone-revoked" {
+			t.Fatal("unpaired device's registration was kept")
+		}
+	}
+}
+
+func TestWatcherSendsNothingWhenPairedDevicesAreUnreadable(t *testing.T) {
+	registry, err := OpenRegistry(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = registry.Set("phone", protocol.PushRegistration{Token: "tok1", Environment: "sandbox", Kinds: []string{"approval"}}, time.Unix(1_700_000_000, 0))
+	gateway := &fakeGateway{
+		active: `{"sessions":[{"id":"s1","title":"Notes"}]}`,
+		events: map[string]string{"s1": `{"events":[]}`},
+	}
+	sender := &fakeSender{}
+	w := &Watcher{
+		Gateway: gateway, Sender: sender, Registry: registry,
+		Trusted: func() (map[string]bool, error) { return nil, errors.New("devices.json locked") },
+	}
+	if err := w.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gateway.events["s1"] = `{"events":[{"type":"approval.request","session_id":"s1","payload":{"command":"x"},"seq":1}]}`
+	if err := w.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("pushed without confirming pairing: %v", sender.sent)
+	}
+	if len(registry.All()) != 1 {
+		t.Fatal("a read failure must not drop registrations")
 	}
 }
