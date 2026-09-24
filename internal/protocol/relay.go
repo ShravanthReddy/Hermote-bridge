@@ -21,7 +21,8 @@ import (
 //	  channels ≥1 carry one phone each; kind 0 = the phone's text frame, 1 = binary frame.
 //
 // Phone ⇄ relay: plain WebSocket to /v1/phone?s=<session id>; frames pass
-// through untouched. No bridge → close 4404; bridge full → close 4429.
+// through untouched. No bridge → close 4404; bridge full → close 4429; not
+// admitted in time → close 4408.
 
 const (
 	labelRelayAttach = "hermes-remote v1 relay attach"
@@ -42,6 +43,10 @@ const (
 	RelayCloseFull      = 4429
 	RelayCloseBadAttach = 4401
 	RelayCloseReplaced  = 4409
+	// RelayCloseAdmissionTimeout is a retryable code: the phone app treats it
+	// like any other non-1008 close and reconnects, rather than reading it as
+	// "not paired" the way it reads 1008 during the handshake.
+	RelayCloseAdmissionTimeout = 4408
 )
 
 // RelayChallenge is the relay's first message to an attaching bridge.

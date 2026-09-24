@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -136,6 +137,72 @@ func TestRelayTransportEndToEnd(t *testing.T) {
 	}
 	if _, err := p3.waitFor(ctx, protocol.ChWS, func(b []byte) bool { return strings.Contains(string(b), "gateway.ready") }); err != nil {
 		t.Fatalf("reconnect after relay drop failed: %v", err)
+	}
+}
+
+// TestRelayAdmitsARealBridgeHandshake exercises admission end to end against
+// the real bridge (not the relay package's fake one): a real phone handshake
+// must admit the phone well before the (deliberately short) admission
+// timeout would otherwise close it, and the tunnel must keep working after.
+func TestRelayAdmitsARealBridgeHandshake(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rly := relay.New(relay.Limits{AdmissionTimeout: time.Second}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	rs := httptest.NewServer(rly.Handler())
+	t.Cleanup(rs.Close)
+	relayURL := "ws" + strings.TrimPrefix(rs.URL, "http")
+
+	dialer := &RelayDialer{Server: srv, RelayURL: relayURL, Logger: srv.Logger}
+	dctx, dcancel := context.WithCancel(ctx)
+	defer dcancel()
+	go dialer.Run(dctx)
+	for i := 0; i < 100; i++ {
+		if ok, _ := dialer.Attached(); ok {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if ok, err := dialer.Attached(); !ok {
+		t.Fatalf("bridge never attached to the relay: %s", err)
+	}
+
+	phoneURL := relayURL + "/v1/phone?s=" + srv.Identity.SessionID()
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, _ := srv.Pairings.Issue(time.Minute)
+	p, err := connectPhoneURL(t, ctx, phoneURL, srv.Identity, phone, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.waitFor(ctx, protocol.ChWS, func(b []byte) bool { return strings.Contains(string(b), "gateway.ready") }); err != nil {
+		t.Fatalf("no gateway.ready via relay: %v", err)
+	}
+
+	// Outlive the 1 s admission timeout; a real, admitted phone must survive it.
+	time.Sleep(1500 * time.Millisecond)
+
+	resp, err := http.Get(rs.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Phones  int `json:"phones"`
+		Pending int `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /healthz: %v", err)
+	}
+	if body.Phones != 1 || body.Pending != 0 {
+		t.Fatalf(`healthz = %+v, want {"phones":1,"pending":0}`, body)
+	}
+
+	_ = p.send(ctx, protocol.WSMessage{Ch: protocol.ChWS, Data: `{"jsonrpc":"2.0","id":9,"method":"session.list","params":{}}`})
+	if _, err := p.waitFor(ctx, protocol.ChWS, func(b []byte) bool {
+		return strings.Contains(string(b), `\"id\":9`) || strings.Contains(string(b), `\"id\": 9`)
+	}); err != nil {
+		t.Fatalf("no RPC reply via relay after outliving the admission timeout: %v", err)
 	}
 }
 

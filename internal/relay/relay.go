@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +24,21 @@ import (
 
 // Limits are the abuse controls (docs/REMOTE-ACCESS.md §6).
 type Limits struct {
+	// MaxPhonesPerSession caps admitted phones per session: a phone counts
+	// once the relay has forwarded it a second data frame from the bridge,
+	// i.e. once the bridge's §4 handshake with it has succeeded.
 	MaxPhonesPerSession int
-	IdleTimeout         time.Duration
+	// MaxPendingPerSession caps unadmitted phones per session; once it is
+	// reached the oldest unadmitted phone is displaced to make room.
+	MaxPendingPerSession int
+	// MaxPendingPerIP caps unadmitted phones per session from one client IP.
+	MaxPendingPerIP int
+	// AdmissionTimeout is how long a phone may stay unadmitted before the
+	// relay closes it. Must stay above the 30 s per-frame phone write
+	// timeout: one slow phone can delay another phone's frames, because the
+	// bridge→phones loop writes inline.
+	AdmissionTimeout time.Duration
+	IdleTimeout      time.Duration
 	// BytesPerSecond caps each channel's sustained throughput (token bucket);
 	// Burst is the bucket size.
 	BytesPerSecond int
@@ -37,6 +51,9 @@ type Limits struct {
 // DefaultLimits match the design document.
 var DefaultLimits = Limits{
 	MaxPhonesPerSession:       protocol.RelayMaxPhones,
+	MaxPendingPerSession:      8,
+	MaxPendingPerIP:           4,
+	AdmissionTimeout:          45 * time.Second,
 	IdleTimeout:               100 * time.Second,
 	BytesPerSecond:            2 << 20,
 	Burst:                     8 << 20,
@@ -60,6 +77,15 @@ func New(limits Limits, logger *slog.Logger) *Server {
 	d := DefaultLimits
 	if limits.MaxPhonesPerSession > 0 {
 		d.MaxPhonesPerSession = limits.MaxPhonesPerSession
+	}
+	if limits.MaxPendingPerSession > 0 {
+		d.MaxPendingPerSession = limits.MaxPendingPerSession
+	}
+	if limits.MaxPendingPerIP > 0 {
+		d.MaxPendingPerIP = limits.MaxPendingPerIP
+	}
+	if limits.AdmissionTimeout > 0 {
+		d.AdmissionTimeout = limits.AdmissionTimeout
 	}
 	if limits.IdleTimeout > 0 {
 		d.IdleTimeout = limits.IdleTimeout
@@ -89,12 +115,15 @@ func (s *Server) Handler() http.Handler {
 		s.mu.Lock()
 		n := len(s.sessions)
 		phones := 0
+		pending := 0
 		for _, sess := range s.sessions {
-			phones += sess.phoneCount()
+			ph, pe := sess.counts()
+			phones += ph
+			pending += pe
 		}
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "bridges": n, "phones": phones, "uptime_s": int(time.Since(s.started).Seconds())})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "bridges": n, "phones": phones, "pending": pending, "uptime_s": int(time.Since(s.started).Seconds())})
 	})
 	mux.HandleFunc("GET /v1/bridge", s.serveBridge)
 	mux.HandleFunc("GET /v1/phone", s.servePhone)
@@ -118,14 +147,31 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// limitKey groups client addresses for the connection and pending limits:
+// IPv4 (including IPv4-mapped IPv6) keys by the address itself; IPv6 keys by
+// its /64 prefix, since a single allocation can rotate through many
+// addresses in that range. Anything that fails to parse is returned
+// unchanged.
+func limitKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	if addr.Is4() || addr.Is4In6() {
+		return addr.Unmap().String()
+	}
+	return netip.PrefixFrom(addr, 64).Masked().String()
+}
+
 func (s *Server) allowIP(ip string) bool {
+	key := limitKey(ip)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	w := s.ipRate[ip]
+	w := s.ipRate[key]
 	if w == nil || now.Sub(w.start) > time.Minute {
 		w = &ipWindow{start: now}
-		s.ipRate[ip] = w
+		s.ipRate[key] = w
 	}
 	w.count++
 	if len(s.ipRate) > 10000 { // keep the map bounded
@@ -156,12 +202,114 @@ type phone struct {
 	ch     uint16
 	bucket *bucket
 	cancel context.CancelFunc
+
+	key    string // limitKey(ip); groups this phone for the pending-connection limits
+	opened time.Time
+
+	// bridgeFrames and admitted are guarded by session.mu.
+	bridgeFrames int
+	admitted     bool
 }
 
-func (sess *session) phoneCount() int {
+// shutdown closes p off the caller's goroutine. Close waits up to 5 s for the
+// peer's close handshake, and a peer that never reads would otherwise stall
+// every phone in the session (the bridge→phones loop writes inline).
+func (p *phone) shutdown(code websocket.StatusCode, reason string) {
+	go func() {
+		p.ws.Close(code, reason)
+		p.cancel()
+	}()
+}
+
+// counts returns the total and pending phone counts in one lock acquisition.
+func (sess *session) counts() (phones, pending int) {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	return len(sess.phones)
+	for _, p := range sess.phones {
+		phones++
+		if !p.admitted {
+			pending++
+		}
+	}
+	return phones, pending
+}
+
+// displacementVictim picks the pending phone to evict, if any, to make room
+// for a new connection keyed by key. It never returns an admitted phone.
+// Callers should displace this victim only after confirming there isn't
+// already room without doing so. Caller holds sess.mu.
+func (sess *session) displacementVictim(key string, maxPerKey, maxTotal int) *phone {
+	perKey := map[string]int{}
+	oldestByKey := map[string]*phone{}
+	total := 0
+	for _, p := range sess.phones {
+		if p.admitted {
+			continue
+		}
+		total++
+		perKey[p.key]++
+		if old, ok := oldestByKey[p.key]; !ok || p.opened.Before(old.opened) {
+			oldestByKey[p.key] = p
+		}
+	}
+
+	if perKey[key] >= maxPerKey {
+		return oldestByKey[key]
+	}
+	if total < maxTotal {
+		return nil
+	}
+	// Evict from the busiest key; ties go to whichever key's oldest pending
+	// phone is oldest.
+	var busiestKey string
+	var busiestCount int
+	var busiestOldest time.Time
+	for k, c := range perKey {
+		old := oldestByKey[k]
+		if busiestKey == "" || c > busiestCount || (c == busiestCount && old.opened.Before(busiestOldest)) {
+			busiestKey, busiestCount, busiestOldest = k, c, old.opened
+		}
+	}
+	if busiestKey == "" {
+		return nil
+	}
+	return oldestByKey[busiestKey]
+}
+
+// admittedCount returns the number of admitted phones. Caller must hold
+// sess.mu.
+func (sess *session) admittedCount() int {
+	n := 0
+	for _, p := range sess.phones {
+		if p.admitted {
+			n++
+		}
+	}
+	return n
+}
+
+// countBridgeFrame records a data frame from the bridge on channel ch and
+// decides admission: a phone is admitted the moment it has received its
+// second bridge frame, provided the session has room for another admitted
+// phone. p is nil if the channel has no phone (already gone). overCap is
+// true when this frame would admit a phone past maxAdmitted; the caller
+// must then close the phone and drop the frame.
+func (sess *session) countBridgeFrame(ch uint16, maxAdmitted int) (p *phone, overCap bool) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	p = sess.phones[ch]
+	if p == nil {
+		return nil, false
+	}
+	p.bridgeFrames++
+	if p.bridgeFrames == 2 && !p.admitted {
+		if sess.admittedCount() < maxAdmitted {
+			p.admitted = true
+		} else {
+			overCap = true
+		}
+	}
+	return p, overCap
 }
 
 // writeBridge serialises writes to the bridge socket.
@@ -265,11 +413,13 @@ func (s *Server) serveBridge(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		sess.mu.Lock()
-		p := sess.phones[ch]
-		sess.mu.Unlock()
+		p, overCap := sess.countBridgeFrame(ch, s.Limits.MaxPhonesPerSession)
 		if p == nil {
 			continue // phone already gone
+		}
+		if overCap {
+			sess.closePhone(ch, protocol.RelayCloseFull, "too many phones for this bridge")
+			continue
 		}
 		if !p.bucket.take(len(payload)) {
 			sess.closePhone(ch, websocket.StatusPolicyViolation, "rate limit")
@@ -294,9 +444,23 @@ func (sess *session) closePhone(ch uint16, code websocket.StatusCode, reason str
 	delete(sess.phones, ch)
 	sess.mu.Unlock()
 	if p != nil {
-		p.ws.Close(code, reason)
-		p.cancel()
+		p.shutdown(code, reason)
 	}
+}
+
+// closeIfPending closes p only if it is still the phone occupying its
+// channel and has not since been admitted, so a stale reference (e.g. from a
+// delayed timer) never closes a different phone that reused the same channel
+// number, and never races an admission that just landed.
+func (sess *session) closeIfPending(p *phone, code websocket.StatusCode, reason string) {
+	sess.mu.Lock()
+	if sess.phones[p.ch] != p || p.admitted {
+		sess.mu.Unlock()
+		return
+	}
+	delete(sess.phones, p.ch)
+	sess.mu.Unlock()
+	p.shutdown(code, reason)
 }
 
 func (sess *session) closeAllPhones() {
@@ -305,8 +469,7 @@ func (sess *session) closeAllPhones() {
 	sess.phones = map[uint16]*phone{}
 	sess.mu.Unlock()
 	for _, p := range phones {
-		p.ws.Close(protocol.RelayCloseNoBridge, "bridge went away")
-		p.cancel()
+		p.shutdown(protocol.RelayCloseNoBridge, "bridge went away")
 	}
 }
 
@@ -336,13 +499,17 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 	}
 	pctx, pcancel := context.WithCancel(sess.ctx)
 	defer pcancel()
-	p := &phone{ws: ws, bucket: newBucket(s.Limits.BytesPerSecond, s.Limits.Burst), cancel: pcancel}
+	p := &phone{ws: ws, bucket: newBucket(s.Limits.BytesPerSecond, s.Limits.Burst), cancel: pcancel, key: limitKey(ip), opened: time.Now()}
 
 	sess.mu.Lock()
-	if len(sess.phones) >= s.Limits.MaxPhonesPerSession {
+	if sess.admittedCount() >= s.Limits.MaxPhonesPerSession {
 		sess.mu.Unlock()
 		ws.Close(protocol.RelayCloseFull, "too many phones for this bridge")
 		return
+	}
+	victim := sess.displacementVictim(p.key, s.Limits.MaxPendingPerIP, s.Limits.MaxPendingPerSession)
+	if victim != nil {
+		delete(sess.phones, victim.ch)
 	}
 	sess.nextCh++
 	if sess.nextCh == 0 {
@@ -357,6 +524,9 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 	p.ch = sess.nextCh
 	sess.phones[p.ch] = p
 	sess.mu.Unlock()
+	if victim != nil {
+		victim.shutdown(protocol.RelayCloseFull, "displaced by a newer connection")
+	}
 
 	log := s.Logger.With("ip", ip, "session", short(id), "channel", p.ch)
 	log.Info("phone connected")
@@ -369,6 +539,11 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 		sess.mu.Unlock()
 		_ = sess.control(context.Background(), protocol.RelayControl{T: "close", C: p.ch})
 	}()
+
+	timer := time.AfterFunc(s.Limits.AdmissionTimeout, func() {
+		sess.closeIfPending(p, protocol.RelayCloseAdmissionTimeout, "not admitted by the bridge in time")
+	})
+	defer timer.Stop()
 
 	if err := sess.control(pctx, protocol.RelayControl{T: "open", C: p.ch}); err != nil {
 		return
