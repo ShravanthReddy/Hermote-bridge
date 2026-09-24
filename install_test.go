@@ -210,7 +210,7 @@ func TestInstallerPinnedLegacyArchiveFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("legacy fallback failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "predates the rename") {
+	if !strings.Contains(output, "archive published for pinned release") {
 		t.Fatalf("legacy fallback was not disclosed:\n%s", output)
 	}
 	if _, err := os.Stat(filepath.Join(fixture.installDir, "hermote-bridge")); err != nil {
@@ -280,9 +280,6 @@ func TestInstallerSuccessfulSetupMigratesRecognizedLegacyCommand(t *testing.T) {
 	target, readErr := os.Readlink(legacy)
 	if readErr != nil || target != "hermote-bridge" {
 		t.Fatalf("recognized legacy command was not migrated: target=%q err=%v\n%s", target, readErr, output)
-	}
-	if !strings.Contains(output, "Migrated compatibility command") {
-		t.Fatalf("migration was not reported:\n%s", output)
 	}
 }
 

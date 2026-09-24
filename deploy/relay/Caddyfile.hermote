@@ -1,0 +1,24 @@
+# Shared Oracle VM: explicit relay hosts and static website routing.
+129-213-134-110.sslip.io, relay.hermote.app {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+	log {
+		output file /var/log/caddy/relay-access.log {
+			roll_size 50mb
+			roll_keep 7
+			roll_keep_for 168h
+		}
+	}
+}
+
+hermote.app {
+	encode zstd gzip
+	root * /srv/hermote-site/current
+	redir /privacy/ /privacy permanent
+	try_files {path} {path}.html
+	file_server
+}
+
+www.hermote.app {
+	redir https://hermote.app{uri} permanent
+}
