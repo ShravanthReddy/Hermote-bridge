@@ -8,6 +8,15 @@
 # 127.0.0.1:8080, Caddy terminating TLS for $RELAY_DOMAIN and proxying to it.
 # Caddy obtains and renews the Let's Encrypt certificate itself.
 set -euo pipefail
+# Fresh provisioning only: a rerun must not erase co-hosted sites or aliases.
+# Refuse before touching binaries or service units as well as the Caddyfile.
+if [[ -e /etc/caddy/Caddyfile || -L /etc/caddy/Caddyfile ||
+      -e /etc/systemd/system/hermes-relay.service || -L /etc/systemd/system/hermes-relay.service ||
+      -e /usr/local/bin/hermes-relay || -L /usr/local/bin/hermes-relay ]]; then
+    echo "Existing Caddy or relay installation found; refusing to overwrite this server." >&2
+    echo "For Hermote hosting updates, follow deploy/relay/HOSTING.md." >&2
+    exit 1
+fi
 : "${RELAY_DOMAIN:?set RELAY_DOMAIN}"
 BIN="${RELAY_BIN:-$HOME/hermes-relay}"
 [[ -f "$BIN" ]] || BIN="/home/${SUDO_USER:-ubuntu}/hermes-relay"
