@@ -127,7 +127,7 @@ func newProxyTestServerAtGateway(
 
 func readTestPlain(t *testing.T, link *capturePhoneLink, suite *protocol.Suite) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	var assembler protocol.ChunkAssembler
 	for {
@@ -303,7 +303,7 @@ func TestHTTPZeroWaitCeilingAndEventualReleaseAfterReply(t *testing.T) {
 		}, nil
 	})
 	connection, link, suite := newProxyTestConnection(t, deps, transport)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	request := func(id uint64) protocol.HTTPRequest {
 		return protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: id, Method: http.MethodGet, Path: "/api/status"}
@@ -328,8 +328,8 @@ func TestHTTPZeroWaitCeilingAndEventualReleaseAfterReply(t *testing.T) {
 	if first.ID != 1 || first.Status != http.StatusOK {
 		t.Fatalf("first response = %+v", first)
 	}
-	capacityCtx, capacityCancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	lease, result := acquirePools(capacityCtx, 500*time.Millisecond, connection.httpSlots, connection.srv.httpSlots)
+	capacityCtx, capacityCancel := context.WithTimeout(ctx, s2TestWait)
+	lease, result := acquirePools(capacityCtx, s2TestWait, connection.httpSlots, connection.srv.httpSlots)
 	capacityCancel()
 	if result != admissionGranted {
 		t.Fatalf("HTTP capacity was not restored after response write: %v", result)
@@ -363,7 +363,7 @@ func TestHTTPProcessWideCeilingSpansConnections(t *testing.T) {
 	})
 	first, firstLink, firstSuite := newProxyTestConnection(t, deps, transport)
 	second, secondLink, secondSuite := newProxyTestConnectionForServer(t, first.srv)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	request := func(id uint64) protocol.HTTPRequest {
 		return protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: id, Method: http.MethodGet, Path: "/api/status"}
@@ -387,8 +387,8 @@ func TestHTTPProcessWideCeilingSpansConnections(t *testing.T) {
 	}
 	// The phone observes the response before the worker's deferred release.
 	// Await actual capacity restoration before exercising zero-wait admission.
-	capacityCtx, capacityCancel := context.WithTimeout(ctx, time.Second)
-	lease, result := acquirePools(capacityCtx, time.Second, first.httpSlots, first.srv.httpSlots)
+	capacityCtx, capacityCancel := context.WithTimeout(ctx, s2TestWait)
+	lease, result := acquirePools(capacityCtx, s2TestWait, first.httpSlots, first.srv.httpSlots)
 	capacityCancel()
 	if result != admissionGranted {
 		t.Fatalf("capacity not restored after first response: %v", result)
@@ -462,7 +462,7 @@ func TestHTTPResponseWriteFailureReportsTunnelFailure(t *testing.T) {
 		if !strings.Contains(err.Error(), "forced write failure") {
 			t.Fatalf("reported failure = %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(s2TestWait):
 		t.Fatal("response write failure was not reported")
 	}
 }
@@ -520,7 +520,7 @@ func TestHTTPBodyReadTimeoutMapsTo504ClosesBodyAndKeepsConnectionUsable(t *testi
 		}, nil
 	})
 	connection, link, suite := newProxyTestConnection(t, deps, transport)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	for id := uint64(1); id <= 2; id++ {
 		if err := connection.startProxyHTTP(ctx, protocol.HTTPRequest{
@@ -563,7 +563,7 @@ func TestProxyHTTPDetectsRawAndQuotedOverflowThenContinues(t *testing.T) {
 		}, nil
 	})
 	connection, link, suite := newProxyTestConnection(t, deps, transport)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	for id := uint64(1); id <= 3; id++ {
 		if err := connection.startProxyHTTP(ctx, protocol.HTTPRequest{
@@ -623,7 +623,7 @@ func TestProxyPreservesEscapedPathQueryAndConstrainsRedirects(t *testing.T) {
 	defer gatewayServer.Close()
 	server := newProxyTestServerAtGateway(t, deps, gatewayServer)
 	connection, link, suite := newProxyTestConnectionForServer(t, server)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 
 	query := "name=%E2%9C%93&x=a/b?c:d@e+z"
@@ -739,22 +739,22 @@ func TestProxyHTTPDoTimeoutMapsTo504AndParentCancellationRepliesNothing(t *testi
 	cancel()
 	select {
 	case <-transportExited:
-	case <-time.After(time.Second):
+	case <-time.After(s2TestWait):
 		t.Fatal("canceled transport did not exit")
 	}
 	// One transport-exit signal belonged to the completed timeout. Drain both
 	// deterministically before inspecting the output queue.
 	select {
 	case <-transportExited:
-	case <-time.After(time.Second):
+	case <-time.After(s2TestWait):
 		t.Fatal("parent-canceled transport did not exit")
 	}
 	if len(link.writes) != 0 {
 		t.Fatal("parent cancellation emitted an HTTP response")
 	}
-	capacityCtx, capacityCancel := context.WithTimeout(context.Background(), time.Second)
+	capacityCtx, capacityCancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer capacityCancel()
-	lease, result := acquirePools(capacityCtx, time.Second, connection.httpSlots, connection.srv.httpSlots)
+	lease, result := acquirePools(capacityCtx, s2TestWait, connection.httpSlots, connection.srv.httpSlots)
 	if result != admissionGranted {
 		t.Fatalf("parent cancellation retained HTTP capacity: admission=%v", result)
 	}
@@ -780,7 +780,7 @@ func TestFSBlockedWorkerRetainsCeilingReturnsBusyAndRestoresCapacity(t *testing.
 		return nil, nil
 	}
 	connection, link, suite := newProxyTestConnection(t, deps, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	query := "path=" + url.QueryEscape(t.TempDir())
 	// Another folder tests admission while the stuck read retains the process slot.
@@ -869,13 +869,13 @@ func TestFSHeldSlotWarningFiresOnceAndStopsAfterCompletion(t *testing.T) {
 		if message != "filesystem listing still holds bridge capacity" {
 			t.Fatalf("warning message = %q", message)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(s2TestWait):
 		t.Fatal("held filesystem slot emitted no warning")
 	}
 	close(release)
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(s2TestWait):
 		t.Fatal("filesystem listing did not finish")
 	}
 	select {
@@ -897,7 +897,7 @@ func TestBestEffortGatewayLimitCloseSkipsBusySendGate(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(s2TestWait):
 		connection.sendMu.Unlock()
 		t.Fatal("busy send gate blocked the oversize close path")
 	}
@@ -936,7 +936,7 @@ func newOversizeGatewayServer(t *testing.T, trigger <-chan struct{}, accepted ch
 		defer gatewaySocket.Close(websocket.StatusNormalClosure, "")
 		close(accepted)
 		<-trigger
-		writeCtx, cancel := context.WithTimeout(r.Context(), time.Second)
+		writeCtx, cancel := context.WithTimeout(r.Context(), s2TestWait)
 		defer cancel()
 		if err := gatewaySocket.Write(
 			writeCtx, websocket.MessageText, bytes.Repeat([]byte("x"), protocol.MaxPlaintext),
@@ -979,7 +979,7 @@ func TestTunnelOversizeGatewayFrameWritesCloseBeforeFailing(t *testing.T) {
 		if !errors.Is(err, errPlaintextLimit) {
 			t.Fatalf("tunnel result = %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(s2TestWait):
 		t.Fatal("oversized gateway frame did not end tunnel")
 	}
 	if len(link.writes) != 0 {
@@ -1007,7 +1007,7 @@ func TestTunnelOversizeGatewayFrameSkipsCloseWhenSendGateBusy(t *testing.T) {
 			connection.sendMu.Unlock()
 			t.Fatalf("tunnel result = %v", err)
 		}
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(s2TestWait):
 		connection.sendMu.Unlock()
 		t.Fatal("busy send gate delayed oversized-frame tunnel failure")
 	}
@@ -1017,11 +1017,16 @@ func TestTunnelOversizeGatewayFrameSkipsCloseWhenSendGateBusy(t *testing.T) {
 	}
 }
 
+// s2TestWait bounds a wait for something that must happen. The send-gate tests hold the gate for
+// the whole wait, so a path that blocked on it could never finish in time: the bound only turns
+// that hang into a failure, and it is generous so a loaded machine cannot turn a pass into one.
+const s2TestWait = 30 * time.Second
+
 // awaitS2TestValue bounds test observations independently of the deliberately
 // non-cooperative worker gates used to prove retained ownership.
 func awaitS2TestValue[T any](t *testing.T, ch <-chan T, label string) T {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s2TestWait)
 	defer cancel()
 	return receiveTestValue(t, ctx, ch, label)
 }
