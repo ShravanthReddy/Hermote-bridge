@@ -20,7 +20,8 @@ type folderLister struct {
 	processSlots *workPool
 	mu           sync.Mutex
 	reads        map[string]*folderRead
-	abandoned    map[string]*folderRead
+	// abandoned is a stale read a retry replaced, kept until macOS returns, so an identical requested path holds at most two process slots.
+	abandoned map[string]*folderRead
 }
 
 // folderRead is one read in progress and, once it settles, its answer.
@@ -101,6 +102,7 @@ func (l *folderLister) admissionAnswer(ctx context.Context, result admissionResu
 	case admissionCanceled:
 		err := ctx.Err()
 		if err == nil {
+			// contextExpired in limits.go detects elapsed deadlines before ctx.Err is set.
 			err = context.DeadlineExceeded
 		}
 		return 0, nil, err

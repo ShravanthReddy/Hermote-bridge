@@ -21,6 +21,12 @@ type folderListResult struct {
 	err    error
 }
 
+type folderListTimedResult struct {
+	result   folderListResult
+	finished time.Time
+}
+
+// pendingDeadlineContext exposes an elapsed deadline before Err is set.
 type pendingDeadlineContext struct {
 	context.Context
 	deadline time.Time
@@ -480,6 +486,23 @@ func (h *folderLogHandler) WithGroup(string) slog.Handler      { return h }
 
 func TestFolderListingLogsAnOverdueRead(t *testing.T) {
 	path := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		handler := &folderLogHandler{records: make(chan folderLogRecord, 1)}
+		deps := folderListingDeps(30*time.Millisecond, func(string) ([]os.DirEntry, error) {
+			return nil, nil
+		})
+		l := newFolderLister(deps, slog.New(handler), newWorkPool(2))
+		quick := listFolder(l, context.Background(), folderQuery(t.TempDir()), newWorkPool(1))
+		if quick.err != nil || decodeListing(t, quick.body).Error != "" {
+			t.Fatalf("quick listing = status %d body %s err %v", quick.status, quick.body, quick.err)
+		}
+		select {
+		case record := <-handler.records:
+			t.Fatalf("on-time read logged: %+v", record)
+		default:
+		}
+	})
+
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enterOnce sync.Once
@@ -495,16 +518,6 @@ func TestFolderListingLogsAnOverdueRead(t *testing.T) {
 	l := newFolderLister(deps, slog.New(handler), newWorkPool(2))
 	releaseRead := closeFolderRead(release)
 	defer releaseRead()
-
-	quick := listFolder(l, context.Background(), folderQuery(t.TempDir()), newWorkPool(1))
-	if quick.err != nil || decodeListing(t, quick.body).Error != "" {
-		t.Fatalf("quick listing = status %d body %s err %v", quick.status, quick.body, quick.err)
-	}
-	select {
-	case record := <-handler.records:
-		t.Fatalf("on-time read logged: %+v", record)
-	default:
-	}
 
 	result := startFolderList(l, context.Background(), folderQuery(path), newWorkPool(1))
 	select {
@@ -552,16 +565,12 @@ func TestFolderListingWaiterStopsAtTheReadsDeadline(t *testing.T) {
 		synctest.Wait()
 
 		time.Sleep(100 * time.Millisecond)
-		waiterResult := make(chan struct {
-			result   folderListResult
-			finished time.Time
-		}, 1)
+		waiterResult := make(chan folderListTimedResult, 1)
 		go func() {
 			status, body, err := l.list(context.Background(), query, newWorkPool(2))
-			waiterResult <- struct {
-				result   folderListResult
-				finished time.Time
-			}{folderListResult{status: status, body: body, err: err}, time.Now()}
+			waiterResult <- folderListTimedResult{
+				result: folderListResult{status: status, body: body, err: err}, finished: time.Now(),
+			}
 		}()
 		synctest.Wait()
 		l.mu.Lock()
