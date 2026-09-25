@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"os/user"
@@ -52,17 +53,17 @@ func fsList(ctx context.Context, rawQuery string) (int, []byte) {
 func fsListWithDependencies(
 	ctx context.Context, rawQuery string, deps bridgeDependencies, lease *workLease, logger *slog.Logger,
 ) (int, []byte, error) {
-	return fsListSettling(ctx, rawQuery, deps, lease, logger, func(int, []byte) {})
+	status, body, _, err := fsListSettling(ctx, rawQuery, deps, lease, logger, func(int, []byte) {})
+	return status, body, err
 }
 
-// fsListSettling is fsListWithDependencies that also reports when the read
-// itself ends: settle runs exactly once, with the read's answer, even when the
-// listing already answered ETIMEDOUT and the read finished long after
-// (`fsFlights`).
+// fsListSettling reports when the read itself ends: settle runs exactly once,
+// with the read's answer, even when the listing already answered ETIMEDOUT and
+// the read finished long after (`folderLister`).
 func fsListSettling(
 	ctx context.Context, rawQuery string, deps bridgeDependencies, lease *workLease, logger *slog.Logger,
 	settle func(status int, body []byte),
-) (int, []byte, error) {
+) (status int, body []byte, timedOut bool, err error) {
 	values, queryErr := url.ParseQuery(rawQuery)
 	if queryErr != nil {
 		// Query parsing is the only synchronous exit after FS admission. No
@@ -72,7 +73,7 @@ func fsListSettling(
 		}
 		status, body := fsListingResponse(400, fsListing{Entries: []fsEntry{}, Detail: "Invalid path"})
 		settle(status, body)
-		return status, body, nil
+		return status, body, false, nil
 	}
 	listCtx, cancel := context.WithTimeout(ctx, deps.fsListTimeout)
 	defer cancel()
@@ -99,13 +100,18 @@ func fsListSettling(
 	go func() {
 		var completed result
 		defer func() {
+			if completed.body == nil {
+				completed.status, completed.body = fsListingResponse(
+					http.StatusOK, fsListing{Entries: []fsEntry{}, Error: "read-error"},
+				)
+			}
+			if lease != nil {
+				lease.release()
+			}
+			close(owned)
 			settle(completed.status, completed.body)
 			done <- completed
 		}()
-		defer close(owned)
-		if lease != nil {
-			defer lease.release()
-		}
 
 		target, err := deps.fsResolvePath(values.Get("path"))
 		if err != nil {
@@ -151,12 +157,12 @@ func fsListSettling(
 	select {
 	case <-listCtx.Done():
 		if ctx.Err() != nil {
-			return 0, nil, ctx.Err()
+			return 0, nil, false, ctx.Err()
 		}
 		status, body := fsListingResponse(200, fsListing{Entries: []fsEntry{}, Error: "ETIMEDOUT"})
-		return status, body, nil
+		return status, body, true, nil
 	case r := <-done:
-		return r.status, r.body, nil
+		return r.status, r.body, false, nil
 	}
 }
 

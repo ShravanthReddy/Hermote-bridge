@@ -40,6 +40,7 @@ type bridgeDependencies struct {
 	fsReadDir         readDirectory
 	fsListTimeout     time.Duration
 	fsWarningAfter    time.Duration
+	fsStaleAfter      time.Duration
 	blobSpoolRoot     string
 	blobMaxFileBytes  int64
 	blobReservedBytes int64
@@ -61,6 +62,7 @@ func productionBridgeDependencies() bridgeDependencies {
 		fsReadDir:         os.ReadDir,
 		fsListTimeout:     defaultFSListTimeout,
 		fsWarningAfter:    defaultFSWarningAfter,
+		fsStaleAfter:      6 * defaultFSListTimeout,
 		blobMaxFileBytes:  defaultBlobMaxFileBytes,
 		blobReservedBytes: defaultBlobReservedBytes,
 		blobChunkBytes:    defaultBlobChunkBytes,
@@ -104,19 +106,46 @@ func (p *workPool) release() {
 }
 
 type workLease struct {
-	once  sync.Once
-	pools []*workPool
+	mu       sync.Mutex
+	pools    []*workPool
+	released bool
 }
 
 func (l *workLease) release() {
 	if l == nil {
 		return
 	}
-	l.once.Do(func() {
-		for i := len(l.pools) - 1; i >= 0; i-- {
-			l.pools[i].release()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
+	l.released = true
+	for i := len(l.pools) - 1; i >= 0; i-- {
+		l.pools[i].release()
+	}
+	l.pools = nil
+}
+
+// releasePool gives back one pool's slot before the rest of the lease; a
+// later release() skips it. No-op when the pool is not held or the lease
+// was already released.
+func (l *workLease) releasePool(pool *workPool) {
+	if l == nil || pool == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
+	for i, held := range l.pools {
+		if held == pool {
+			l.pools = append(l.pools[:i], l.pools[i+1:]...)
+			pool.release()
+			return
 		}
-	})
+	}
 }
 
 type admissionResult int

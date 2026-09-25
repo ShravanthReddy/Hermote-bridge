@@ -87,6 +87,10 @@ The bridge has three distinct attachment paths:
 
 The blob path reserves up to 512 MiB of process-wide spool space and writes 512 KiB chunks. Its channel accepts frames up to 1 MiB of plaintext, including chunk metadata and base64 encoding. It allows one active upload per phone connection and two process-wide. These are operational limits, not additional per-file capacity.
 
+## Folder listing limits
+
+A folder listing answers within 10 seconds (`ETIMEDOUT` otherwise). Each phone can have 2 listings in progress, and the bridge allows 8 process-wide. A folder being read is read once for every phone asking. A folder macOS has not finished reading holds one bridge-wide slot until it does, or for 60 seconds, after which a new request reads it again.
+
 ## Installation details
 
 The installer verifies the downloaded archive against `checksums.txt` before installing the bridge. On macOS, `hermote-bridge up` starts the background service and displays your setup code. Pairing records and configuration are stored on your Mac.

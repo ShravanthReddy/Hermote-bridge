@@ -783,8 +783,7 @@ func TestFSBlockedWorkerRetainsCeilingReturnsBusyAndRestoresCapacity(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	query := "path=" + url.QueryEscape(t.TempDir())
-	// Another folder: a second listing of the stuck one waits on its read
-	// instead (`fsFlights`), so capacity is tested with a different path.
+	// Another folder tests admission while the stuck read retains the process slot.
 	otherQuery := "path=" + url.QueryEscape(t.TempDir())
 	requestFor := func(id uint64, query string) protocol.HTTPRequest {
 		return protocol.HTTPRequest{
@@ -800,8 +799,8 @@ func TestFSBlockedWorkerRetainsCeilingReturnsBusyAndRestoresCapacity(t *testing.
 	if first.Status != http.StatusOK || !strings.Contains(string(first.Body), `"ETIMEDOUT"`) {
 		t.Fatalf("timed-out listing = %+v body=%s", first, first.Body)
 	}
-	if len(connection.fsSlots.slots) != 1 || len(connection.srv.fsSlots.slots) != 1 {
-		t.Fatal("blocked ReadDir did not retain filesystem capacity")
+	if len(connection.fsSlots.slots) != 0 || len(connection.srv.fsSlots.slots) != 1 {
+		t.Fatalf("timed-out ReadDir slots: connection=%d process=%d", len(connection.fsSlots.slots), len(connection.srv.fsSlots.slots))
 	}
 	if err := connection.startProxyHTTP(ctx, requestFor(2, otherQuery), nil); err != nil {
 		t.Fatal(err)
@@ -810,15 +809,31 @@ func TestFSBlockedWorkerRetainsCeilingReturnsBusyAndRestoresCapacity(t *testing.
 	if busy.Status != http.StatusOK || !strings.Contains(string(busy.Body), `"EBUSY"`) || calls.Load() != 1 {
 		t.Fatalf("busy listing=%+v body=%s calls=%d", busy, busy.Body, calls.Load())
 	}
+	if err := connection.startProxyHTTP(ctx, request(3), nil); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := readTestHTTPResponse(t, link, suite)
+	if duplicate.Status != http.StatusOK || !strings.Contains(string(duplicate.Body), `"ETIMEDOUT"`) || calls.Load() != 1 {
+		t.Fatalf("duplicate listing=%+v body=%s calls=%d", duplicate, duplicate.Body, calls.Load())
+	}
 	close(release)
 	deadline := time.Now().Add(time.Second)
-	for (len(connection.fsSlots.slots) != 0 || len(connection.srv.fsSlots.slots) != 0) && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		connection.srv.folders.mu.Lock()
+		readsEmpty := len(connection.srv.folders.reads) == 0
+		connection.srv.folders.mu.Unlock()
+		if readsEmpty && len(connection.fsSlots.slots) == 0 && len(connection.srv.fsSlots.slots) == 0 {
+			break
+		}
 		runtime.Gosched()
 	}
-	if len(connection.fsSlots.slots) != 0 || len(connection.srv.fsSlots.slots) != 0 {
-		t.Fatal("completed ReadDir did not restore filesystem capacity")
+	connection.srv.folders.mu.Lock()
+	readsEmpty := len(connection.srv.folders.reads) == 0
+	connection.srv.folders.mu.Unlock()
+	if !readsEmpty || len(connection.fsSlots.slots) != 0 || len(connection.srv.fsSlots.slots) != 0 {
+		t.Fatal("completed ReadDir did not restore filesystem capacity and remove its read")
 	}
-	if err := connection.startProxyHTTP(ctx, request(3), nil); err != nil {
+	if err := connection.startProxyHTTP(ctx, request(4), nil); err != nil {
 		t.Fatal(err)
 	}
 	awaitS2TestValue(t, entered, "worker entry")

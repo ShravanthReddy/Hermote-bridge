@@ -195,25 +195,7 @@ func (c *conn) proxyHTTP(
 func (c *conn) proxyFSList(
 	ctx context.Context, req protocol.HTTPRequest, httpLease *workLease, fail func(error),
 ) {
-	status, body, err := c.srv.fsFlights.listFolder(
-		ctx, req.Query, c.srv.deps.fsListTimeout,
-		func(settle func(int, []byte)) (int, []byte, error) {
-			fsLease, result := acquirePools(ctx, 0, c.fsSlots, c.srv.fsSlots)
-			if result == admissionCanceled {
-				// No read started; a waiter asks again rather than waiting on nothing.
-				settle(fsListingResponse(http.StatusOK, fsListing{Entries: []fsEntry{}, Error: "ETIMEDOUT"}))
-				return 0, nil, ctx.Err()
-			}
-			if result == admissionBusy {
-				status, body := fsListingResponse(http.StatusOK, fsListing{
-					Entries: []fsEntry{}, Error: "EBUSY", Detail: "too many filesystem listings",
-				})
-				settle(status, body)
-				return status, body, nil
-			}
-			return fsListSettling(ctx, req.Query, c.srv.deps, fsLease, c.srv.Logger, settle)
-		},
-	)
+	status, body, err := c.srv.folders.list(ctx, req.Query, c.fsSlots)
 	if err != nil {
 		httpLease.release()
 		return

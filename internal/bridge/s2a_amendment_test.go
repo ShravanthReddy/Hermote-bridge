@@ -801,8 +801,7 @@ func TestBlockedFSResolverMakesNextListingBusyWithoutStartingResolver(t *testing
 	connection, link, suite := newProxyTestConnection(t, deps, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	// The second listing names another folder: one of the stuck folder would
-	// wait on its read (`fsFlights`) rather than test the capacity ceiling.
+	// The second listing names another folder so it tests capacity admission rather than joining the stuck read.
 	request := func(id uint64, path string) protocol.HTTPRequest {
 		return protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: id, Method: http.MethodGet, Path: "/api/fs/list", Query: "path=" + path}
 	}
