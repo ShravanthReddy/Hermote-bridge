@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -46,6 +47,11 @@ type Limits struct {
 	// ConnectionsPerIPPerMinute bounds new connections from one address.
 	ConnectionsPerIPPerMinute int
 	MaxFrame                  int64
+	// TrustedProxies are the CIDR ranges allowed to speak for a client via
+	// X-Forwarded-For — the local reverse proxy (loopback on the hosted VM,
+	// the compose network on self-hosted installs). Empty falls back to
+	// DefaultTrustedProxies.
+	TrustedProxies []netip.Prefix
 }
 
 // DefaultLimits match the design document.
@@ -59,6 +65,29 @@ var DefaultLimits = Limits{
 	Burst:                     8 << 20,
 	ConnectionsPerIPPerMinute: 60,
 	MaxFrame:                  protocol.MaxPlaintext + 1024,
+}
+
+// DefaultTrustedProxies is the loopback range the hosted VM's proxy uses.
+var DefaultTrustedProxies = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("::1/128"),
+}
+
+// ParseTrustedProxies parses a comma-separated list of CIDRs, rejecting any
+// entry that is not a valid prefix so a typo fails fast at startup.
+func ParseTrustedProxies(list string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(list) == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for _, part := range strings.Split(list, ",") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy CIDR %q: %w", part, err)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
 }
 
 // Server is the relay.
@@ -102,6 +131,10 @@ func New(limits Limits, logger *slog.Logger) *Server {
 	if limits.MaxFrame > 0 {
 		d.MaxFrame = limits.MaxFrame
 	}
+	d.TrustedProxies = DefaultTrustedProxies
+	if len(limits.TrustedProxies) > 0 {
+		d.TrustedProxies = limits.TrustedProxies
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -136,13 +169,36 @@ type ipWindow struct {
 	count int
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
-	}
+func clientIP(r *http.Request, trusted []netip.Prefix) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	// X-Forwarded-For counts only when the direct peer sits inside a trusted
+	// proxy prefix — from anywhere else the header is client-controlled and
+	// would let a caller pick the address the relay rate-limits and groups
+	// pending connections by. Under this Caddyfile the proxy replaces the
+	// header rather than appending, so the last valid entry is the client it
+	// saw; earlier entries may be forged.
+	if peer, aerr := netip.ParseAddr(host); aerr == nil {
+		peer = peer.WithZone("").Unmap()
+		for _, prefix := range trusted {
+			if !prefix.Contains(peer) {
+				continue
+			}
+			parts := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				entry := strings.TrimSpace(parts[i])
+				if entry == "" {
+					continue
+				}
+				if addr, perr := netip.ParseAddr(entry); perr == nil {
+					return addr.String()
+				}
+				break
+			}
+			break
+		}
 	}
 	return host
 }
@@ -327,7 +383,7 @@ func (sess *session) control(ctx context.Context, c protocol.RelayControl) error
 }
 
 func (s *Server) serveBridge(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := clientIP(r, s.Limits.TrustedProxies)
 	if !s.allowIP(ip) {
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return
@@ -474,7 +530,7 @@ func (sess *session) closeAllPhones() {
 }
 
 func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := clientIP(r, s.Limits.TrustedProxies)
 	if !s.allowIP(ip) {
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return

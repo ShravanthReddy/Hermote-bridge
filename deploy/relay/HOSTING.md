@@ -4,6 +4,13 @@
 All configured relay hostnames proxy to the relay process on `127.0.0.1:8080`.
 The public endpoint is `wss://relay.hermote.app`. Keep port 8080 bound to loopback.
 
+`RELAY_TRUSTED_PROXIES` (or `-trusted-proxies`) lists the CIDRs whose
+`X-Forwarded-For` header the relay honours; every other peer's header is ignored
+so a direct client cannot pick the address it is rate-limited under. The hosted
+VM keeps the `127.0.0.0/8,::1/128` default — Caddy proxies on loopback. The
+self-hosted `compose.yaml` sets it to the compose network's subnet because
+containerised Caddy reaches the relay over the Docker bridge.
+
 `install-vm.sh` is for a fresh VM only. It now refuses when a Caddyfile or relay
 installation already exists, before changing binaries or services. A partial first
 installation also requires manual inspection and recovery; blindly rerunning this

@@ -20,6 +20,9 @@ services:
     cap_drop: [ALL]
     environment:
       RELAY_LISTEN: ":8080"
+      # Caddy reaches the relay over the compose network, not loopback — the
+      # subnet below must stay in sync with this list.
+      RELAY_TRUSTED_PROXIES: "172.30.0.0/24"
     healthcheck:
       test: ["CMD", "/hermes-relay", "-version"]
       interval: 60s
@@ -43,3 +46,10 @@ services:
 volumes:
   caddy-data:
   caddy-config:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

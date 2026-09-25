@@ -24,6 +24,8 @@ func main() {
 	addr := flag.String("listen", envOr("RELAY_LISTEN", ":8080"), "listen address")
 	maxPhones := flag.Int("max-phones", 0, "phones per bridge session (default 4)")
 	perIP := flag.Int("per-ip-per-minute", 0, "new connections per IP per minute (default 60)")
+	trustedProxies := flag.String("trusted-proxies", envOr("RELAY_TRUSTED_PROXIES", "127.0.0.0/8,::1/128"),
+		"comma-separated CIDRs allowed to set X-Forwarded-For")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
 	if *showVersion {
@@ -31,7 +33,16 @@ func main() {
 		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	srv := relay.New(relay.Limits{MaxPhonesPerSession: *maxPhones, ConnectionsPerIPPerMinute: *perIP}, log)
+	proxies, err := relay.ParseTrustedProxies(*trustedProxies)
+	if err != nil {
+		log.Error("invalid -trusted-proxies", "err", err)
+		os.Exit(1)
+	}
+	srv := relay.New(relay.Limits{
+		MaxPhonesPerSession:       *maxPhones,
+		ConnectionsPerIPPerMinute: *perIP,
+		TrustedProxies:            proxies,
+	}, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
