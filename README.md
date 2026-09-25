@@ -89,7 +89,7 @@ The blob path reserves up to 512 MiB of process-wide spool space and writes 512 
 
 ## Folder listing limits
 
-A folder listing answers within 10 seconds (`ETIMEDOUT` otherwise). Each phone can have 2 listings in progress, and the bridge allows 8 process-wide. A folder being read is read once for every phone asking. A folder macOS has not finished reading holds one bridge-wide slot until it does, or for 60 seconds, after which a new request reads it again.
+A folder listing answers within 10 seconds (`ETIMEDOUT` otherwise). Each phone can have 2 listings in progress, and the bridge allows 8 process-wide. A folder being read is read once for every phone asking. A folder macOS has not finished reading keeps its bridge-wide slot until macOS returns. After 60 s one new request may read it again, which takes a second slot; no identical requested path holds more than two. Because a timed-out read gives back its phone's slot, one phone expanding several stuck folders can hold most of the bridge-wide slots.
 
 ## Installation details
 

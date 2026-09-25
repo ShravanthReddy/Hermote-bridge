@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -18,6 +20,14 @@ type folderListResult struct {
 	body   []byte
 	err    error
 }
+
+type pendingDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (ctx pendingDeadlineContext) Deadline() (time.Time, bool) { return ctx.deadline, true }
+func (pendingDeadlineContext) Err() error                      { return nil }
 
 func folderListingDeps(timeout time.Duration, readDir readDirectory) bridgeDependencies {
 	deps := productionBridgeDependencies()
@@ -36,6 +46,13 @@ func closeFolderRead(release chan struct{}) func() {
 func listFolder(l *folderLister, ctx context.Context, query string, connSlots *workPool) folderListResult {
 	status, body, err := l.list(ctx, query, connSlots)
 	return folderListResult{status: status, body: body, err: err}
+}
+
+func requireFolderListingError(t *testing.T, got folderListResult, expected string) {
+	t.Helper()
+	if got.status != http.StatusOK || got.err != nil || decodeListing(t, got.body).Error != expected {
+		t.Fatalf("listing error = status %d body %s err %v, want %s", got.status, got.body, got.err, expected)
+	}
 }
 
 func startFolderList(
@@ -60,20 +77,20 @@ func awaitFolderList(t *testing.T, result <-chan folderListResult) folderListRes
 	}
 }
 
-func waitForFolderWaiters(t *testing.T, l *folderLister, key string, count int) {
+func waitForFolderJoins(t *testing.T, l *folderLister, key string, count int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		l.mu.Lock()
 		read := l.reads[key]
-		ready := read != nil && read.waiters == count
+		ready := read != nil && read.joins == count
 		l.mu.Unlock()
 		if ready {
 			return
 		}
-		runtimeGosched()
+		runtime.Gosched()
 	}
-	t.Fatal("folder listing waiter count did not reach the expected value")
+	t.Fatal("folder listing join count did not reach the expected value")
 }
 
 func waitForNoFolderReads(t *testing.T, l *folderLister) {
@@ -86,13 +103,9 @@ func waitForNoFolderReads(t *testing.T, l *folderLister) {
 		if empty {
 			return
 		}
-		runtimeGosched()
+		runtime.Gosched()
 	}
 	t.Fatal("finished folder read remained registered")
-}
-
-func runtimeGosched() {
-	runtime.Gosched()
 }
 
 func folderQuery(path string) string {
@@ -164,8 +177,8 @@ func TestFolderListingHandsTheReadsAnswerToWaiters(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("filesystem read did not start")
 	}
-	waiter := startFolderList(l, context.Background(), query, connSlots)
-	waitForFolderWaiters(t, l, key, 1)
+	waiter := startFolderList(l, context.Background(), query, newWorkPool(2))
+	waitForFolderJoins(t, l, key, 1)
 	releaseRead()
 
 	for i, result := range []folderListResult{awaitFolderList(t, leader), awaitFolderList(t, waiter)} {
@@ -305,7 +318,7 @@ func TestFolderListingCancelledWaiterLeavesTheRead(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	waiter := startFolderList(l, ctx, query, connSlots)
-	waitForFolderWaiters(t, l, key, 1)
+	waitForFolderJoins(t, l, key, 1)
 	cancel()
 	if got := awaitFolderList(t, waiter); got.err != context.Canceled {
 		t.Fatalf("canceled waiter error = %v, want context.Canceled", got.err)
@@ -470,7 +483,10 @@ func TestFolderListingLogsAnOverdueRead(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enterOnce sync.Once
-	deps := folderListingDeps(30*time.Millisecond, func(string) ([]os.DirEntry, error) {
+	deps := folderListingDeps(30*time.Millisecond, func(folderPath string) ([]os.DirEntry, error) {
+		if folderPath != path {
+			return nil, nil
+		}
 		enterOnce.Do(func() { close(entered) })
 		<-release
 		return nil, nil
@@ -479,6 +495,16 @@ func TestFolderListingLogsAnOverdueRead(t *testing.T) {
 	l := newFolderLister(deps, slog.New(handler), newWorkPool(2))
 	releaseRead := closeFolderRead(release)
 	defer releaseRead()
+
+	quick := listFolder(l, context.Background(), folderQuery(t.TempDir()), newWorkPool(1))
+	if quick.err != nil || decodeListing(t, quick.body).Error != "" {
+		t.Fatalf("quick listing = status %d body %s err %v", quick.status, quick.body, quick.err)
+	}
+	select {
+	case record := <-handler.records:
+		t.Fatalf("on-time read logged: %+v", record)
+	default:
+	}
 
 	result := startFolderList(l, context.Background(), folderQuery(path), newWorkPool(1))
 	select {
@@ -509,5 +535,335 @@ func TestFolderListingLogsAnOverdueRead(t *testing.T) {
 	case extra := <-handler.records:
 		t.Fatalf("overdue read logged more than once: %+v", extra)
 	default:
+	}
+}
+
+func TestFolderListingWaiterStopsAtTheReadsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		deps := folderListingDeps(200*time.Millisecond, func(string) ([]os.DirEntry, error) {
+			<-release
+			return nil, nil
+		})
+		l := newFolderLister(deps, slog.Default(), newWorkPool(4))
+		connSlots := newWorkPool(2)
+		query := folderQuery(t.TempDir())
+		leader := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+
+		time.Sleep(100 * time.Millisecond)
+		waiterResult := make(chan struct {
+			result   folderListResult
+			finished time.Time
+		}, 1)
+		go func() {
+			status, body, err := l.list(context.Background(), query, newWorkPool(2))
+			waiterResult <- struct {
+				result   folderListResult
+				finished time.Time
+			}{folderListResult{status: status, body: body, err: err}, time.Now()}
+		}()
+		synctest.Wait()
+		l.mu.Lock()
+		joins := l.reads[fsFlightKey(query)].joins
+		l.mu.Unlock()
+		if joins != 1 {
+			t.Fatalf("read joins = %d, want 1", joins)
+		}
+		joinedAt := time.Now()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case got := <-waiterResult:
+			requireFolderListingError(t, got.result, "ETIMEDOUT")
+			if elapsed := got.finished.Sub(joinedAt); elapsed != 100*time.Millisecond {
+				t.Fatalf("waiter waited %s after joining, want 100ms", elapsed)
+			}
+		default:
+			t.Fatal("waiter did not stop at the read deadline")
+		}
+		close(release)
+		synctest.Wait()
+		select {
+		case <-leader:
+		default:
+			t.Fatal("leader did not settle after release")
+		}
+	})
+}
+
+func TestFolderListingRetriesAStuckFolderOnlyOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var reads atomic.Int32
+		releases := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+		deps := folderListingDeps(10*time.Millisecond, func(string) ([]os.DirEntry, error) {
+			n := int(reads.Add(1))
+			<-releases[n-1]
+			return nil, nil
+		})
+		deps.fsStaleAfter = 30 * time.Millisecond
+		l := newFolderLister(deps, slog.Default(), newWorkPool(4))
+		connSlots := newWorkPool(2)
+		query := folderQuery(t.TempDir())
+		key := fsFlightKey(query)
+
+		first := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		requireFolderListingError(t, <-first, "ETIMEDOUT")
+		l.mu.Lock()
+		firstRead := l.reads[key]
+		l.mu.Unlock()
+		if firstRead == nil {
+			t.Fatal("timed-out read was not registered")
+		}
+		time.Sleep(40 * time.Millisecond)
+		second := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		requireFolderListingError(t, <-second, "ETIMEDOUT")
+		if reads.Load() != 2 {
+			t.Fatalf("filesystem reads = %d, want 2", reads.Load())
+		}
+		l.mu.Lock()
+		abandonedRead := l.abandoned[key]
+		secondRead := l.reads[key]
+		secondJoins := 0
+		if secondRead != nil {
+			secondJoins = secondRead.joins
+		}
+		l.mu.Unlock()
+		if abandonedRead != firstRead || secondRead == nil || secondRead == firstRead {
+			t.Fatal("retry did not preserve the original abandoned read")
+		}
+
+		time.Sleep(40 * time.Millisecond)
+		attemptedAt := time.Now()
+		thirdAttempt := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		if !time.Now().Equal(attemptedAt) {
+			t.Fatalf("blocked retry advanced fake time from %s to %s", attemptedAt, time.Now())
+		}
+		select {
+		case got := <-thirdAttempt:
+			requireFolderListingError(t, got, "ETIMEDOUT")
+		default:
+			t.Fatal("retry with an outstanding abandoned read did not answer immediately")
+		}
+		if reads.Load() != 2 {
+			t.Fatalf("filesystem reads after blocked retry = %d, want 2", reads.Load())
+		}
+		l.mu.Lock()
+		stillAbandoned := l.abandoned[key]
+		currentRead := l.reads[key]
+		currentJoins := 0
+		if currentRead != nil {
+			currentJoins = currentRead.joins
+		}
+		l.mu.Unlock()
+		if stillAbandoned != firstRead || currentRead != secondRead || currentJoins != secondJoins {
+			t.Fatal("blocked retry changed the outstanding reads or join count")
+		}
+
+		close(releases[0])
+		synctest.Wait()
+		l.mu.Lock()
+		abandoned := len(l.abandoned)
+		l.mu.Unlock()
+		if abandoned != 0 {
+			t.Fatalf("abandoned reads after first settled = %d, want 0", abandoned)
+		}
+		time.Sleep(40 * time.Millisecond)
+		third := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		requireFolderListingError(t, <-third, "ETIMEDOUT")
+		if reads.Load() != 3 {
+			t.Fatalf("filesystem reads after abandoned read settled = %d, want 3", reads.Load())
+		}
+		for _, release := range releases {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		}
+		synctest.Wait()
+	})
+}
+
+func TestFolderListingReplacementFinishingFirstKeepsTheAbandonedRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var reads atomic.Int32
+		releases := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+		deps := folderListingDeps(10*time.Millisecond, func(string) ([]os.DirEntry, error) {
+			n := int(reads.Add(1))
+			<-releases[n-1]
+			return nil, nil
+		})
+		deps.fsStaleAfter = 30 * time.Millisecond
+		l := newFolderLister(deps, slog.Default(), newWorkPool(4))
+		connSlots := newWorkPool(2)
+		query := folderQuery(t.TempDir())
+		key := fsFlightKey(query)
+
+		first := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		requireFolderListingError(t, <-first, "ETIMEDOUT")
+		time.Sleep(40 * time.Millisecond)
+		second := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		requireFolderListingError(t, <-second, "ETIMEDOUT")
+		l.mu.Lock()
+		firstRead := l.abandoned[key]
+		secondRead := l.reads[key]
+		l.mu.Unlock()
+		if firstRead == nil || secondRead == nil || firstRead == secondRead {
+			t.Fatal("stale retry did not retain the abandoned read")
+		}
+
+		close(releases[1])
+		synctest.Wait()
+		l.mu.Lock()
+		abandoned := l.abandoned[key]
+		current := l.reads[key]
+		l.mu.Unlock()
+		if abandoned != firstRead || current != nil {
+			t.Fatal("replacement completion removed the abandoned read or kept its registry entry")
+		}
+		third := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		requireFolderListingError(t, <-third, "ETIMEDOUT")
+		if reads.Load() != 3 {
+			t.Fatalf("filesystem reads = %d, want 3", reads.Load())
+		}
+		l.mu.Lock()
+		thirdRead := l.reads[key]
+		thirdJoins := 0
+		if thirdRead != nil {
+			thirdJoins = thirdRead.joins
+		}
+		l.mu.Unlock()
+		if thirdRead == nil {
+			t.Fatal("third read was not registered")
+		}
+		time.Sleep(40 * time.Millisecond)
+		attemptedAt := time.Now()
+		blocked := startFolderList(l, context.Background(), query, connSlots)
+		synctest.Wait()
+		if !time.Now().Equal(attemptedAt) {
+			t.Fatalf("blocked retry advanced fake time from %s to %s", attemptedAt, time.Now())
+		}
+		select {
+		case got := <-blocked:
+			requireFolderListingError(t, got, "ETIMEDOUT")
+		default:
+			t.Fatal("retry with an outstanding abandoned read did not answer immediately")
+		}
+		if reads.Load() != 3 || len(l.processSlots.slots) != 2 {
+			t.Fatalf("reads=%d process slots=%d, want 3 and 2", reads.Load(), len(l.processSlots.slots))
+		}
+		l.mu.Lock()
+		stillAbandoned := l.abandoned[key]
+		currentRead := l.reads[key]
+		currentJoins := 0
+		if currentRead != nil {
+			currentJoins = currentRead.joins
+		}
+		l.mu.Unlock()
+		if stillAbandoned != firstRead || currentRead != thirdRead || currentJoins != thirdJoins {
+			t.Fatal("blocked retry changed the outstanding read or join count")
+		}
+		for _, release := range releases {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		}
+		synctest.Wait()
+	})
+}
+
+func TestFolderListingFailedRetryAdmissionLeavesTheReadInPlace(t *testing.T) {
+	for _, admission := range []string{"busy", "canceled", "elapsed-deadline"} {
+		t.Run(admission, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var reads atomic.Int32
+				releases := []chan struct{}{make(chan struct{}), make(chan struct{})}
+				deps := folderListingDeps(10*time.Millisecond, func(string) ([]os.DirEntry, error) {
+					n := int(reads.Add(1))
+					<-releases[n-1]
+					return nil, nil
+				})
+				deps.fsStaleAfter = 30 * time.Millisecond
+				l := newFolderLister(deps, slog.Default(), newWorkPool(2))
+				connSlots := newWorkPool(2)
+				query := folderQuery(t.TempDir())
+				first := startFolderList(l, context.Background(), query, connSlots)
+				synctest.Wait()
+				requireFolderListingError(t, <-first, "ETIMEDOUT")
+				l.mu.Lock()
+				firstRead := l.reads[fsFlightKey(query)]
+				firstJoins := 0
+				if firstRead != nil {
+					firstJoins = firstRead.joins
+				}
+				l.mu.Unlock()
+				if firstRead == nil {
+					t.Fatal("timed-out read was not registered")
+				}
+				time.Sleep(40 * time.Millisecond)
+
+				var result folderListResult
+				if admission == "busy" {
+					if !l.processSlots.tryAcquire() {
+						t.Fatal("could not fill process pool")
+					}
+					result = listFolder(l, context.Background(), query, connSlots)
+				} else if admission == "canceled" {
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					result = listFolder(l, ctx, query, connSlots)
+				} else {
+					ctx := pendingDeadlineContext{
+						Context: context.Background(), deadline: time.Now().Add(-time.Second),
+					}
+					result = listFolder(l, ctx, query, connSlots)
+				}
+				if admission == "busy" {
+					requireFolderListingError(t, result, "EBUSY")
+					l.processSlots.release()
+				} else if admission == "canceled" && result.err != context.Canceled {
+					t.Fatalf("canceled retry error = %v, want context.Canceled", result.err)
+				} else if admission == "elapsed-deadline" && result.err != context.DeadlineExceeded {
+					t.Fatalf("elapsed-deadline retry error = %v, want context.DeadlineExceeded", result.err)
+				}
+				l.mu.Lock()
+				current := l.reads[fsFlightKey(query)]
+				currentJoins := 0
+				if current != nil {
+					currentJoins = current.joins
+				}
+				abandoned := l.abandoned[fsFlightKey(query)]
+				l.mu.Unlock()
+				if current != firstRead || currentJoins != firstJoins || abandoned != nil {
+					t.Fatal("failed retry admission changed the read maps or join count")
+				}
+
+				retry := startFolderList(l, context.Background(), query, connSlots)
+				synctest.Wait()
+				requireFolderListingError(t, <-retry, "ETIMEDOUT")
+				if reads.Load() != 2 {
+					t.Fatalf("filesystem reads = %d, want 2", reads.Load())
+				}
+				for _, release := range releases {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}
+				synctest.Wait()
+			})
+		})
 	}
 }

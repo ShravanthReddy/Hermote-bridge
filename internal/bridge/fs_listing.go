@@ -20,13 +20,14 @@ type folderLister struct {
 	processSlots *workPool
 	mu           sync.Mutex
 	reads        map[string]*folderRead
+	abandoned    map[string]*folderRead
 }
 
 // folderRead is one read in progress and, once it settles, its answer.
 type folderRead struct {
 	started time.Time
 	done    chan struct{}
-	waiters int // guarded by folderLister.mu; tests wait on it
+	joins   int // requests that joined this read; guarded by folderLister.mu; tests wait on it
 	status  int
 	body    []byte
 }
@@ -36,7 +37,8 @@ func newFolderLister(deps bridgeDependencies, logger *slog.Logger, processSlots 
 		logger = slog.Default()
 	}
 	return &folderLister{
-		deps: deps, logger: logger, processSlots: processSlots, reads: map[string]*folderRead{},
+		deps: deps, logger: logger, processSlots: processSlots,
+		reads: map[string]*folderRead{}, abandoned: map[string]*folderRead{},
 	}
 }
 
@@ -56,11 +58,20 @@ func (l *folderLister) list(ctx context.Context, rawQuery string, connSlots *wor
 	}
 
 	l.mu.Lock()
-	if read := l.reads[key]; read != nil && time.Since(read.started) < l.deps.fsStaleAfter {
-		read.waiters++
-		remaining := l.deps.fsListTimeout - time.Since(read.started)
-		l.mu.Unlock()
-		return read.wait(ctx, remaining)
+	var stale *folderRead
+	if read := l.reads[key]; read != nil {
+		if time.Since(read.started) < l.deps.fsStaleAfter {
+			read.joins++
+			remaining := l.deps.fsListTimeout - time.Since(read.started)
+			l.mu.Unlock()
+			return read.wait(ctx, remaining)
+		}
+		if l.abandoned[key] != nil {
+			l.mu.Unlock()
+			status, body := fsListingResponse(http.StatusOK, fsListing{Entries: []fsEntry{}, Error: "ETIMEDOUT"})
+			return status, body, nil
+		}
+		stale = read
 	}
 
 	lease, result := acquirePools(ctx, 0, connSlots, l.processSlots)
@@ -69,6 +80,9 @@ func (l *folderLister) list(ctx context.Context, rawQuery string, connSlots *wor
 		return l.admissionAnswer(ctx, result)
 	}
 	read := &folderRead{started: time.Now(), done: make(chan struct{})}
+	if stale != nil {
+		l.abandoned[key] = stale
+	}
 	l.reads[key] = read
 	l.mu.Unlock()
 
@@ -85,7 +99,11 @@ func (l *folderLister) list(ctx context.Context, rawQuery string, connSlots *wor
 func (l *folderLister) admissionAnswer(ctx context.Context, result admissionResult) (int, []byte, error) {
 	switch result {
 	case admissionCanceled:
-		return 0, nil, ctx.Err()
+		err := ctx.Err()
+		if err == nil {
+			err = context.DeadlineExceeded
+		}
+		return 0, nil, err
 	case admissionBusy:
 		status, body := fsListingResponse(http.StatusOK, fsListing{
 			Entries: []fsEntry{}, Error: "EBUSY", Detail: "too many filesystem listings",
@@ -100,6 +118,9 @@ func (l *folderLister) finish(key string, read *folderRead, status int, body []b
 	l.mu.Lock()
 	if l.reads[key] == read {
 		delete(l.reads, key)
+	}
+	if l.abandoned[key] == read {
+		delete(l.abandoned, key)
 	}
 	l.mu.Unlock()
 	read.status, read.body = status, body
