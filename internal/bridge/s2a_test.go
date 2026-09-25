@@ -783,11 +783,15 @@ func TestFSBlockedWorkerRetainsCeilingReturnsBusyAndRestoresCapacity(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	query := "path=" + url.QueryEscape(t.TempDir())
-	request := func(id uint64) protocol.HTTPRequest {
+	// Another folder: a second listing of the stuck one waits on its read
+	// instead (`fsFlights`), so capacity is tested with a different path.
+	otherQuery := "path=" + url.QueryEscape(t.TempDir())
+	requestFor := func(id uint64, query string) protocol.HTTPRequest {
 		return protocol.HTTPRequest{
 			Ch: protocol.ChHTTP, ID: id, Method: http.MethodGet, Path: "/api/fs/list", Query: query,
 		}
 	}
+	request := func(id uint64) protocol.HTTPRequest { return requestFor(id, query) }
 	if err := connection.startProxyHTTP(ctx, request(1), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +803,7 @@ func TestFSBlockedWorkerRetainsCeilingReturnsBusyAndRestoresCapacity(t *testing.
 	if len(connection.fsSlots.slots) != 1 || len(connection.srv.fsSlots.slots) != 1 {
 		t.Fatal("blocked ReadDir did not retain filesystem capacity")
 	}
-	if err := connection.startProxyHTTP(ctx, request(2), nil); err != nil {
+	if err := connection.startProxyHTTP(ctx, requestFor(2, otherQuery), nil); err != nil {
 		t.Fatal(err)
 	}
 	busy := readTestHTTPResponse(t, link, suite)

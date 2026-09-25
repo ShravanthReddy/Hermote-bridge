@@ -801,17 +801,19 @@ func TestBlockedFSResolverMakesNextListingBusyWithoutStartingResolver(t *testing
 	connection, link, suite := newProxyTestConnection(t, deps, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	request := func(id uint64) protocol.HTTPRequest {
-		return protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: id, Method: http.MethodGet, Path: "/api/fs/list", Query: "path=/x"}
+	// The second listing names another folder: one of the stuck folder would
+	// wait on its read (`fsFlights`) rather than test the capacity ceiling.
+	request := func(id uint64, path string) protocol.HTTPRequest {
+		return protocol.HTTPRequest{Ch: protocol.ChHTTP, ID: id, Method: http.MethodGet, Path: "/api/fs/list", Query: "path=" + path}
 	}
-	if err := connection.startProxyHTTP(ctx, request(1), nil); err != nil {
+	if err := connection.startProxyHTTP(ctx, request(1, "/x"), nil); err != nil {
 		t.Fatal(err)
 	}
 	awaitS2TestValue(t, entered, "worker entry")
 	if response := readTestHTTPResponse(t, link, suite); response.Status != http.StatusOK || !strings.Contains(string(response.Body), "ETIMEDOUT") {
 		t.Fatalf("blocked resolver response = %+v", response)
 	}
-	if err := connection.startProxyHTTP(ctx, request(2), nil); err != nil {
+	if err := connection.startProxyHTTP(ctx, request(2, "/y"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if response := readTestHTTPResponse(t, link, suite); response.Status != http.StatusOK || !strings.Contains(string(response.Body), "EBUSY") {

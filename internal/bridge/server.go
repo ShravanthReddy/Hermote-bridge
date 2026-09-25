@@ -49,7 +49,9 @@ type Server struct {
 	deps       bridgeDependencies
 	httpSlots  *workPool
 	fsSlots    *workPool
-	blobs      *blobManager
+	// fsFlights shares one read per folder across every phone (`fs_flights.go`).
+	fsFlights *fsFlights
+	blobs     *blobManager
 	// OnPush receives a phone's push registration (device token, wanted
 	// kinds); nil when push is not wired.
 	OnPush func(deviceID string, reg protocol.PushRegistration)
@@ -81,6 +83,7 @@ func newServer(
 		deps:       deps,
 		httpSlots:  newWorkPool(deps.httpProcessWide),
 		fsSlots:    newWorkPool(deps.fsProcessWide),
+		fsFlights:  newFSFlights(),
 		conns:      map[*conn]struct{}{},
 	}
 	spoolRoot := deps.blobSpoolRoot

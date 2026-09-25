@@ -52,6 +52,17 @@ func fsList(ctx context.Context, rawQuery string) (int, []byte) {
 func fsListWithDependencies(
 	ctx context.Context, rawQuery string, deps bridgeDependencies, lease *workLease, logger *slog.Logger,
 ) (int, []byte, error) {
+	return fsListSettling(ctx, rawQuery, deps, lease, logger, func(int, []byte) {})
+}
+
+// fsListSettling is fsListWithDependencies that also reports when the read
+// itself ends: settle runs exactly once, with the read's answer, even when the
+// listing already answered ETIMEDOUT and the read finished long after
+// (`fsFlights`).
+func fsListSettling(
+	ctx context.Context, rawQuery string, deps bridgeDependencies, lease *workLease, logger *slog.Logger,
+	settle func(status int, body []byte),
+) (int, []byte, error) {
 	values, queryErr := url.ParseQuery(rawQuery)
 	if queryErr != nil {
 		// Query parsing is the only synchronous exit after FS admission. No
@@ -60,6 +71,7 @@ func fsListWithDependencies(
 			lease.release()
 		}
 		status, body := fsListingResponse(400, fsListing{Entries: []fsEntry{}, Detail: "Invalid path"})
+		settle(status, body)
 		return status, body, nil
 	}
 	listCtx, cancel := context.WithTimeout(ctx, deps.fsListTimeout)
@@ -86,7 +98,10 @@ func fsListWithDependencies(
 	}
 	go func() {
 		var completed result
-		defer func() { done <- completed }()
+		defer func() {
+			settle(completed.status, completed.body)
+			done <- completed
+		}()
 		defer close(owned)
 		if lease != nil {
 			defer lease.release()
