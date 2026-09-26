@@ -7,6 +7,7 @@ package relay
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -261,10 +262,12 @@ type phone struct {
 
 	key    string // limitKey(ip); groups this phone for the pending-connection limits
 	opened time.Time
+	token  string
 
 	// bridgeFrames and admitted are guarded by session.mu.
 	bridgeFrames int
 	admitted     bool
+	vouched      bool
 }
 
 // shutdown closes p off the caller's goroutine. Close waits up to 5 s for the
@@ -296,6 +299,7 @@ func (sess *session) counts() (phones, pending int) {
 // already room without doing so. Caller holds sess.mu.
 func (sess *session) displacementVictim(key string, maxPerKey, maxTotal int) *phone {
 	perKey := map[string]int{}
+	eligibleByKey := map[string]int{}
 	oldestByKey := map[string]*phone{}
 	total := 0
 	for _, p := range sess.phones {
@@ -304,8 +308,11 @@ func (sess *session) displacementVictim(key string, maxPerKey, maxTotal int) *ph
 		}
 		total++
 		perKey[p.key]++
-		if old, ok := oldestByKey[p.key]; !ok || p.opened.Before(old.opened) {
-			oldestByKey[p.key] = p
+		if !p.vouched {
+			eligibleByKey[p.key]++
+			if old, ok := oldestByKey[p.key]; !ok || p.opened.Before(old.opened) {
+				oldestByKey[p.key] = p
+			}
 		}
 	}
 
@@ -320,7 +327,7 @@ func (sess *session) displacementVictim(key string, maxPerKey, maxTotal int) *ph
 	var busiestKey string
 	var busiestCount int
 	var busiestOldest time.Time
-	for k, c := range perKey {
+	for k, c := range eligibleByKey {
 		old := oldestByKey[k]
 		if busiestKey == "" || c > busiestCount || (c == busiestCount && old.opened.Before(busiestOldest)) {
 			busiestKey, busiestCount, busiestOldest = k, c, old.opened
@@ -464,8 +471,13 @@ func (s *Server) serveBridge(w http.ResponseWriter, r *http.Request) {
 		}
 		if ch == protocol.RelayControlChannel {
 			var c protocol.RelayControl
-			if json.Unmarshal(payload, &c) == nil && c.T == "close" {
-				sess.closePhone(c.C, websocket.StatusNormalClosure, c.Reason)
+			if json.Unmarshal(payload, &c) == nil {
+				switch c.T {
+				case "close":
+					sess.closePhone(c.C, websocket.StatusNormalClosure, c.Reason)
+				case "vouch":
+					s.vouch(sess, c)
+				}
 			}
 			continue
 		}
@@ -492,6 +504,25 @@ func (s *Server) serveBridge(w http.ResponseWriter, r *http.Request) {
 			sess.closePhone(ch, websocket.StatusGoingAway, "")
 		}
 	}
+}
+
+func (s *Server) vouch(sess *session, control protocol.RelayControl) {
+	tokenBytes, err := base64.RawURLEncoding.DecodeString(control.Token)
+	if err != nil || len(tokenBytes) != 16 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions[sess.id] != sess {
+		return
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	p := sess.phones[control.C]
+	if p == nil || p.admitted || p.bridgeFrames != 0 || p.vouched || p.token != control.Token {
+		return
+	}
+	p.vouched = true
 }
 
 func (sess *session) closePhone(ch uint16, code websocket.StatusCode, reason string) {
@@ -555,7 +586,12 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 	}
 	pctx, pcancel := context.WithCancel(sess.ctx)
 	defer pcancel()
-	p := &phone{ws: ws, bucket: newBucket(s.Limits.BytesPerSecond, s.Limits.Burst), cancel: pcancel, key: limitKey(ip), opened: time.Now()}
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		ws.Close(websocket.StatusInternalError, "channel token generation failed")
+		return
+	}
+	p := &phone{ws: ws, bucket: newBucket(s.Limits.BytesPerSecond, s.Limits.Burst), cancel: pcancel, key: limitKey(ip), opened: time.Now(), token: base64.RawURLEncoding.EncodeToString(tokenBytes)}
 
 	sess.mu.Lock()
 	if sess.admittedCount() >= s.Limits.MaxPhonesPerSession {
@@ -564,6 +600,21 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	victim := sess.displacementVictim(p.key, s.Limits.MaxPendingPerIP, s.Limits.MaxPendingPerSession)
+	pending, sameKey := 0, 0
+	for _, current := range sess.phones {
+		if current.admitted {
+			continue
+		}
+		pending++
+		if current.key == p.key {
+			sameKey++
+		}
+	}
+	if (sameKey >= s.Limits.MaxPendingPerIP || pending >= s.Limits.MaxPendingPerSession) && victim == nil {
+		sess.mu.Unlock()
+		ws.Close(protocol.RelayCloseFull, "pending phone capacity is protected")
+		return
+	}
 	if victim != nil {
 		delete(sess.phones, victim.ch)
 	}
@@ -601,7 +652,7 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 	})
 	defer timer.Stop()
 
-	if err := sess.control(pctx, protocol.RelayControl{T: "open", C: p.ch}); err != nil {
+	if err := sess.control(pctx, protocol.RelayControl{T: "open", C: p.ch, Token: p.token}); err != nil {
 		return
 	}
 

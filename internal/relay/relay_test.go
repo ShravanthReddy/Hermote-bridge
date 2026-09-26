@@ -2,11 +2,13 @@ package relay
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +45,10 @@ type fakeBridge struct {
 
 	openSig  chan uint16
 	closeSig chan uint16
+
+	openMu     sync.Mutex
+	sendMu     sync.Mutex
+	openTokens map[uint16]string
 }
 
 func newFakeBridge(t *testing.T, ctx context.Context, relayHTTPURL string) *fakeBridge {
@@ -51,6 +57,11 @@ func newFakeBridge(t *testing.T, ctx context.Context, relayHTTPURL string) *fake
 	if err != nil {
 		t.Fatalf("new identity: %v", err)
 	}
+	return newFakeBridgeWithIdentity(t, ctx, relayHTTPURL, id)
+}
+
+func newFakeBridgeWithIdentity(t *testing.T, ctx context.Context, relayHTTPURL string, id *protocol.Identity) *fakeBridge {
+	t.Helper()
 	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ws, _, err := websocket.Dial(dctx, wsURL(relayHTTPURL)+"/v1/bridge", nil)
@@ -89,11 +100,12 @@ func newFakeBridge(t *testing.T, ctx context.Context, relayHTTPURL string) *fake
 	}
 
 	fb := &fakeBridge{
-		t:        t,
-		ws:       ws,
-		id:       id,
-		openSig:  make(chan uint16, 64),
-		closeSig: make(chan uint16, 64),
+		t:          t,
+		ws:         ws,
+		id:         id,
+		openSig:    make(chan uint16, 64),
+		closeSig:   make(chan uint16, 64),
+		openTokens: make(map[uint16]string),
 	}
 	go fb.readLoop()
 	t.Cleanup(func() { ws.Close(websocket.StatusNormalClosure, "") })
@@ -119,6 +131,9 @@ func (fb *fakeBridge) readLoop() {
 		}
 		switch c.T {
 		case "open":
+			fb.openMu.Lock()
+			fb.openTokens[c.C] = c.Token
+			fb.openMu.Unlock()
 			select {
 			case fb.openSig <- c.C:
 			default:
@@ -144,6 +159,12 @@ func (fb *fakeBridge) nextOpen(timeout time.Duration) uint16 {
 	}
 }
 
+func (fb *fakeBridge) openToken(ch uint16) string {
+	fb.openMu.Lock()
+	defer fb.openMu.Unlock()
+	return fb.openTokens[ch]
+}
+
 // nextClose blocks for the next "close" control the relay sends this bridge.
 func (fb *fakeBridge) nextClose(timeout time.Duration) uint16 {
 	fb.t.Helper()
@@ -158,6 +179,8 @@ func (fb *fakeBridge) nextClose(timeout time.Duration) uint16 {
 
 // sendFrame pushes one data frame from the bridge to a phone channel.
 func (fb *fakeBridge) sendFrame(ch uint16, payload []byte) error {
+	fb.sendMu.Lock()
+	defer fb.sendMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return fb.ws.Write(ctx, websocket.MessageBinary, protocol.RelayFrame(ch, protocol.RelayKindBinary, payload))
@@ -166,10 +189,34 @@ func (fb *fakeBridge) sendFrame(ch uint16, payload []byte) error {
 // sendClose pushes a control "close" for a channel, exactly as the real
 // bridge does when a per-channel handshake ends.
 func (fb *fakeBridge) sendClose(ch uint16, reason string) error {
+	fb.sendMu.Lock()
+	defer fb.sendMu.Unlock()
 	raw, _ := json.Marshal(protocol.RelayControl{T: "close", C: ch, Reason: reason})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return fb.ws.Write(ctx, websocket.MessageBinary, protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
+}
+
+func (fb *fakeBridge) sendVouch(ch uint16, token string) error {
+	fb.sendMu.Lock()
+	defer fb.sendMu.Unlock()
+	raw, _ := json.Marshal(protocol.RelayControl{T: "vouch", C: ch, Token: token})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return fb.ws.Write(ctx, websocket.MessageBinary, protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
+}
+
+func vouchAndBarrier(t *testing.T, ctx context.Context, fb *fakeBridge, ch uint16, phone *websocket.Conn) {
+	t.Helper()
+	if err := fb.sendVouch(ch, fb.openToken(ch)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fb.sendFrame(ch, []byte("vouch-barrier")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readData(t, ctx, phone, 2*time.Second)); got != "vouch-barrier" {
+		t.Fatalf("vouch barrier frame = %q", got)
+	}
 }
 
 func mustDialPhone(t *testing.T, ctx context.Context, relayHTTPURL, sessionID, ip string) *websocket.Conn {
@@ -466,6 +513,360 @@ func TestDisplacementNeverPicksAnAdmittedPhone(t *testing.T) {
 		t.Fatalf("A frame 3 = %q", got)
 	}
 	assertStillOpen(t, ctx, fb, chP2, p2)
+}
+
+func requireOpenToken(t *testing.T, fb *fakeBridge, ch uint16) string {
+	t.Helper()
+	token := fb.openToken(ch)
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) != 16 {
+		t.Fatalf("open token %q does not encode 16 bytes (err %v)", token, err)
+	}
+	return token
+}
+
+func TestVouchedVictimSelectionAtAddressCap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+
+	protected := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	protectedCh := fb.nextOpen(2 * time.Second)
+	requireOpenToken(t, fb, protectedCh)
+	vouchAndBarrier(t, ctx, fb, protectedCh, protected)
+
+	newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	waitForClose(t, ctx, newcomer, protocol.RelayCloseFull, 2*time.Second)
+	select {
+	case ch := <-fb.closeSig:
+		t.Fatalf("vouched channel %d was closed to make room", ch)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := fb.sendFrame(protectedCh, []byte("admit")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readData(t, ctx, protected, 2*time.Second)); got != "admit" {
+		t.Fatalf("protected phone got %q", got)
+	}
+}
+
+func TestVouchedVictimSelectionAtSessionCap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerSession: 2, MaxPendingPerIP: 10, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+
+	protected := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	protectedCh := fb.nextOpen(2 * time.Second)
+	requireOpenToken(t, fb, protectedCh)
+	vouchAndBarrier(t, ctx, fb, protectedCh, protected)
+	victim := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.2")
+	victimCh := fb.nextOpen(2 * time.Second)
+
+	newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.3")
+	newcomerCh := fb.nextOpen(2 * time.Second)
+	waitForClose(t, ctx, victim, protocol.RelayCloseFull, 2*time.Second)
+	if closed := fb.nextClose(2 * time.Second); closed != victimCh {
+		t.Fatalf("closed channel %d, want eligible channel %d", closed, victimCh)
+	}
+	assertStillOpen(t, ctx, fb, newcomerCh, newcomer)
+	if err := fb.sendFrame(protectedCh, []byte("protected")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readData(t, ctx, protected, 2*time.Second)); got != "protected" {
+		t.Fatalf("protected phone got %q", got)
+	}
+}
+
+func TestVouchMatchesLiveAttachmentAndToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+
+	first := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	firstCh := fb.nextOpen(2 * time.Second)
+	firstToken := requireOpenToken(t, fb, firstCh)
+	if err := fb.sendVouch(firstCh, "wrong-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fb.sendFrame(firstCh, []byte("wrong-token-barrier")); err != nil {
+		t.Fatal(err)
+	}
+	readData(t, ctx, first, 2*time.Second)
+
+	second := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	secondCh := fb.nextOpen(2 * time.Second)
+	waitForClose(t, ctx, first, protocol.RelayCloseFull, 2*time.Second)
+	if closed := fb.nextClose(2 * time.Second); closed != firstCh {
+		t.Fatalf("wrong-token vouch closed channel %d, want %d", closed, firstCh)
+	}
+	secondToken := requireOpenToken(t, fb, secondCh)
+	if secondToken == firstToken {
+		t.Fatal("channel incarnation reused its open token")
+	}
+	vouchAndBarrier(t, ctx, fb, secondCh, second)
+	third := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	waitForClose(t, ctx, third, protocol.RelayCloseFull, 2*time.Second)
+	select {
+	case ch := <-fb.closeSig:
+		t.Fatalf("valid-token vouch closed channel %d", ch)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestVouchIgnoresStaleCloseAndReusedChannel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rly, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+
+	oldPhone := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	ch := fb.nextOpen(2 * time.Second)
+	oldToken := requireOpenToken(t, fb, ch)
+	if err := fb.sendClose(ch, "replace channel"); err != nil {
+		t.Fatal(err)
+	}
+	waitForClose(t, ctx, oldPhone, websocket.StatusNormalClosure, 2*time.Second)
+	if closed := fb.nextClose(2 * time.Second); closed != ch {
+		t.Fatalf("close control channel %d, want %d", closed, ch)
+	}
+
+	sess := rly.sessions[fb.id.SessionID()]
+	sess.mu.Lock()
+	sess.nextCh = ch - 1
+	sess.mu.Unlock()
+	current := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	currentCh := fb.nextOpen(2 * time.Second)
+	if currentCh != ch {
+		t.Fatalf("reused channel = %d, want %d", currentCh, ch)
+	}
+	currentToken := requireOpenToken(t, fb, currentCh)
+	if currentToken == oldToken {
+		t.Fatal("reused channel retained its previous token")
+	}
+	if err := fb.sendVouch(currentCh, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := fb.sendFrame(currentCh, []byte("stale-token-barrier")); err != nil {
+		t.Fatal(err)
+	}
+	readData(t, ctx, current, 2*time.Second)
+
+	newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	_ = fb.nextOpen(2 * time.Second)
+	waitForClose(t, ctx, current, protocol.RelayCloseFull, 2*time.Second)
+	if closed := fb.nextClose(2 * time.Second); closed != currentCh {
+		t.Fatalf("closed channel %d, want unvouched channel %d", closed, currentCh)
+	}
+	_ = newcomer
+}
+
+func TestVouchAfterFirstBridgeFrameIsIgnored(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+
+	phone := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	ch := fb.nextOpen(2 * time.Second)
+	token := requireOpenToken(t, fb, ch)
+	if err := fb.sendFrame(ch, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	readData(t, ctx, phone, 2*time.Second)
+	if err := fb.sendVouch(ch, token); err != nil {
+		t.Fatal(err)
+	}
+	// The first data frame is already observed by this point; allow the ordered
+	// bridge reader to consume the following control before adding a competitor.
+	time.Sleep(50 * time.Millisecond)
+	newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	_ = fb.nextOpen(2 * time.Second)
+	waitForClose(t, ctx, phone, protocol.RelayCloseFull, 2*time.Second)
+	_ = newcomer
+}
+
+func TestVouchPlusAcceptRemainsPending(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+	phone := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	ch := fb.nextOpen(2 * time.Second)
+	requireOpenToken(t, fb, ch)
+	vouchAndBarrier(t, ctx, fb, ch, phone)
+
+	resp, err := http.Get(rs.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Phones  int `json:"phones"`
+		Pending int `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Phones != 1 || body.Pending != 1 {
+		t.Fatalf("vouch and one Accept frame changed admission: %+v", body)
+	}
+}
+
+func TestFullVouchedPendingPoolRefusesNewcomerWithoutClosingPhones(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rly, rs := newTestRelay(t, Limits{MaxPendingPerSession: 2, MaxPendingPerIP: 2, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+	first := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	firstCh := fb.nextOpen(2 * time.Second)
+	second := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.2")
+	secondCh := fb.nextOpen(2 * time.Second)
+	requireOpenToken(t, fb, firstCh)
+	requireOpenToken(t, fb, secondCh)
+	vouchAndBarrier(t, ctx, fb, firstCh, first)
+	vouchAndBarrier(t, ctx, fb, secondCh, second)
+
+	newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.3")
+	waitForClose(t, ctx, newcomer, protocol.RelayCloseFull, 2*time.Second)
+	select {
+	case ch := <-fb.closeSig:
+		t.Fatalf("full vouched pool closed existing channel %d", ch)
+	case <-time.After(100 * time.Millisecond):
+	}
+	sess := rly.sessions[fb.id.SessionID()]
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if len(sess.phones) != 2 || sess.phones[firstCh] == nil || sess.phones[secondCh] == nil {
+		t.Fatalf("full-pool refusal changed occupants: %+v", sess.phones)
+	}
+}
+
+func TestVouchCloseReplacementRace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rly, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+	phone := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	ch := fb.nextOpen(2 * time.Second)
+	token := requireOpenToken(t, fb, ch)
+	sess := rly.sessions[fb.id.SessionID()]
+	sess.mu.Lock()
+	pending := sess.phones[ch]
+	sess.mu.Unlock()
+
+	var wg sync.WaitGroup
+	var closeTimer sync.WaitGroup
+	closeTimer.Add(1)
+	timer := time.AfterFunc(0, func() {
+		defer closeTimer.Done()
+		sess.closeIfPending(pending, protocol.RelayCloseAdmissionTimeout, "racing timer")
+	})
+	wg.Add(3)
+	go func() { defer wg.Done(); _ = fb.sendVouch(ch, token) }()
+	go func() { defer wg.Done(); sess.closeIfPending(pending, protocol.RelayCloseFull, "racing close") }()
+	go func() { defer wg.Done(); _ = fb.sendFrame(ch, []byte("racing frame")) }()
+	wg.Wait()
+	if !timer.Stop() {
+		closeTimer.Wait()
+	}
+
+	sess.mu.Lock()
+	current := sess.phones[ch]
+	sess.mu.Unlock()
+	if current != nil && current != pending {
+		t.Fatal("racing close/vouch changed the channel occupant")
+	}
+	_ = phone
+}
+
+func TestBridgeReplacementCannotCarryVouchToReusedChannel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	firstBridge := newFakeBridge(t, ctx, rs.URL)
+	oldPhone := mustDialPhone(t, ctx, rs.URL, firstBridge.id.SessionID(), "10.0.0.1")
+	oldChannel := firstBridge.nextOpen(2 * time.Second)
+	oldToken := requireOpenToken(t, firstBridge, oldChannel)
+
+	startVouch := make(chan struct{})
+	vouchDone := make(chan error, 1)
+	go func() {
+		<-startVouch
+		vouchDone <- firstBridge.sendVouch(oldChannel, oldToken)
+	}()
+	close(startVouch)
+	secondBridge := newFakeBridgeWithIdentity(t, ctx, rs.URL, firstBridge.id)
+	<-vouchDone
+	if _, _, err := oldPhone.Read(ctx); err == nil {
+		t.Fatal("phone remained attached after its bridge was replaced")
+	}
+
+	currentPhone := mustDialPhone(t, ctx, rs.URL, secondBridge.id.SessionID(), "10.0.0.1")
+	currentChannel := secondBridge.nextOpen(2 * time.Second)
+	if currentChannel != oldChannel {
+		t.Fatalf("replacement channel = %d, want reused number %d", currentChannel, oldChannel)
+	}
+	currentToken := requireOpenToken(t, secondBridge, currentChannel)
+	if currentToken == oldToken {
+		t.Fatal("replacement reused the prior channel token")
+	}
+	if err := secondBridge.sendVouch(currentChannel, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondBridge.sendFrame(currentChannel, []byte("replacement-barrier")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readData(t, ctx, currentPhone, 2*time.Second)); got != "replacement-barrier" {
+		t.Fatalf("replacement bridge barrier = %q", got)
+	}
+
+	newcomer := mustDialPhone(t, ctx, rs.URL, secondBridge.id.SessionID(), "10.0.0.1")
+	newChannel := secondBridge.nextOpen(2 * time.Second)
+	waitForClose(t, ctx, currentPhone, protocol.RelayCloseFull, 2*time.Second)
+	if closed := secondBridge.nextClose(2 * time.Second); closed != currentChannel {
+		t.Fatalf("stale vouch protected channel %d; closed channel %d instead", currentChannel, closed)
+	}
+	_ = newcomer
+	_ = newChannel
+}
+
+func TestSameGroupSprayCanEvictBeforeVouch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+	first := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	firstCh := fb.nextOpen(2 * time.Second)
+	second := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	_ = fb.nextOpen(2 * time.Second)
+	waitForClose(t, ctx, first, protocol.RelayCloseFull, 2*time.Second)
+	if closed := fb.nextClose(2 * time.Second); closed != firstCh {
+		t.Fatalf("pre-vouch spray closed channel %d, want %d", closed, firstCh)
+	}
+	_ = second
+}
+
+func TestVouchedSocketSurvivesSameGroupSpray(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, rs := newTestRelay(t, Limits{MaxPendingPerIP: 1, AdmissionTimeout: 5 * time.Second})
+	fb := newFakeBridge(t, ctx, rs.URL)
+	protected := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+	ch := fb.nextOpen(2 * time.Second)
+	requireOpenToken(t, fb, ch)
+	vouchAndBarrier(t, ctx, fb, ch, protected)
+	for i := 0; i < 3; i++ {
+		newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
+		waitForClose(t, ctx, newcomer, protocol.RelayCloseFull, 2*time.Second)
+	}
+	select {
+	case closed := <-fb.closeSig:
+		t.Fatalf("spray closed vouched channel %d", closed)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestIPv6AddressesShareOneLimit(t *testing.T) {
