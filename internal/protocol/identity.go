@@ -14,11 +14,13 @@ import (
 const Version = 1
 
 const (
-	labelTranscript = "hermes-remote v1 transcript"
-	labelKeys       = "hermes-remote v1 keys"
-	labelSigBridge  = "hermes-remote v1 bridge"
-	labelSigPhone   = "hermes-remote v1 phone"
-	labelPairProof  = "hermes-remote v1 pair"
+	labelTranscript          = "hermes-remote v1 transcript"
+	labelKeys                = "hermes-remote v1 keys"
+	labelSigBridge           = "hermes-remote v1 bridge"
+	labelSigPhone            = "hermes-remote v1 phone"
+	labelPairProof           = "hermes-remote v1 pair"
+	labelHelloAdmissionPhone = "hermes-remote v1 hello admission phone"
+	labelHelloAdmissionCode  = "hermes-remote v1 hello admission code"
 )
 
 // SessionIDLength is the number of base64url characters in a session id.

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -237,6 +238,106 @@ func TestChunks(t *testing.T) {
 	}
 }
 
+func TestHelloAdmissionProofAndCodeWithoutConsume(t *testing.T) {
+	phone := mustIdentity(t, "hello-admission/phone")
+	bridge := mustIdentity(t, "hello-admission/bridge")
+	hello, _, err := PhoneHello(phone, bridge.SessionID(), newDetRNG("hello-admission/eph"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ats int64 = 1_800_000_123
+	code := []byte("first-pairing-code")
+	stamp := make([]byte, 8)
+	binary.BigEndian.PutUint64(stamp, uint64(ats))
+	payload := bytes.Join([][]byte{
+		lp([]byte{byte(hello.Version)}), lp([]byte(hello.SessionID)), lp(hello.PhoneID),
+		lp(hello.PhoneEph), lp(hello.NonceP), lp(stamp),
+	}, nil)
+	phoneSigLabel := "hermes-remote v1 hello admission phone"
+	codeLabel := "hermes-remote v1 hello admission code"
+	sig := phone.sign(phoneSigLabel, payload)
+	mac := hmac.New(sha256.New, code)
+	mac.Write([]byte(codeLabel))
+	mac.Write(payload)
+
+	// Build a relay-only Hello without depending on the implementation's new
+	// optional fields, so this test first demonstrates the old decoder dropping
+	// the proof extension.
+	var base map[string]json.RawMessage
+	legacyJSON, err := json.Marshal(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(legacyJSON, &base); err != nil {
+		t.Fatal(err)
+	}
+	base["ats"], _ = json.Marshal(ats)
+	base["asig"], _ = json.Marshal(Bytes(sig))
+	base["ap"], _ = json.Marshal(Bytes(mac.Sum(nil)))
+	relayJSON, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Hello
+	if err := json.Unmarshal(relayJSON, &decoded); err != nil {
+		t.Fatalf("decode relay Hello: %v", err)
+	}
+	got, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if gotPayload, err := HelloAdmissionPayload(decoded); err != nil || !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("admission payload = %x, want %x (err %v)", gotPayload, payload, err)
+	}
+	if !VerifyHelloAdmissionSignature(decoded) {
+		t.Fatal("valid Hello admission signature did not verify")
+	}
+	if !VerifyHelloAdmissionCode(decoded, code) || VerifyHelloAdmissionCode(decoded, []byte("wrong code")) {
+		t.Fatal("Hello admission code proof verification mismatch")
+	}
+	for key, want := range map[string]any{"ats": ats, "asig": Bytes(sig), "ap": Bytes(mac.Sum(nil))} {
+		var gotValue any
+		if raw, ok := fields[key]; !ok || json.Unmarshal(raw, &gotValue) != nil {
+			t.Fatalf("relay Hello lost %q: %s", key, got)
+		}
+		wantJSON, _ := json.Marshal(want)
+		gotJSON, _ := json.Marshal(gotValue)
+		if !bytes.Equal(gotJSON, wantJSON) {
+			t.Fatalf("relay Hello %s = %s, want %s", key, gotJSON, wantJSON)
+		}
+	}
+}
+
+func TestHelloAdmissionMalformedExtensionsAreRejected(t *testing.T) {
+	base := `{"v":1,"s":"session","pid":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pe":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","np":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`
+	cases := []struct {
+		name   string
+		suffix string
+	}{
+		{"timestamp without signature", `,"ats":1`},
+		{"signature without timestamp", `,"asig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`},
+		{"code proof without pair", `,"ap":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`},
+		{"null timestamp", `,"ats":null,"asig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`},
+		{"null signature", `,"ats":1,"asig":null`},
+		{"null code proof", `,"ats":1,"asig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ap":null`},
+		{"wrong timestamp type", `,"ats":"1","asig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`},
+		{"wrong signature length", `,"ats":1,"asig":"AA"`},
+		{"wrong code proof length", `,"ats":1,"asig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ap":"AA"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var hello Hello
+			if err := json.Unmarshal([]byte(base[:len(base)-1]+tc.suffix+`}`), &hello); err == nil {
+				t.Fatal("malformed admission extension was accepted")
+			}
+		})
+	}
+}
+
 // ── Golden vectors shared with the Swift client ─────────────────────────────
 
 type vectorFile struct {
@@ -244,6 +345,7 @@ type vectorFile struct {
 	Identity   vecIdentity   `json:"identity"`
 	Pair       vecPair       `json:"pair"`
 	Handshake  vecHandshake  `json:"handshake"`
+	RelayHello vecRelayHello `json:"relayHello"`
 	Envelopes  []vecEnvelope `json:"envelopes"`
 	ChunkSplit vecChunk      `json:"chunk"`
 }
@@ -267,6 +369,16 @@ type vecHandshake struct {
 	PhoneSigLabel, BridgeSigLabel string
 	TranscriptLabel, KeysLabel    string
 	PairProofLabel                string
+}
+
+type vecRelayHello struct {
+	Timestamp  int64
+	HelloJSON  string
+	Payload    string
+	Signature  string
+	CodeProof  string
+	PhoneLabel string
+	CodeLabel  string
 }
 
 type vecEnvelope struct {
@@ -353,6 +465,19 @@ func TestGoldenVectors(t *testing.T) {
 	}
 	helloJSON, _ := json.Marshal(hello)
 	acceptJSON, _ := json.Marshal(accept)
+	const relayTimestamp int64 = 1_800_000_123
+	relayHello := hello
+	if err := phone.AddHelloAdmissionProof(&relayHello, relayTimestamp, code); err != nil {
+		t.Fatal(err)
+	}
+	relayPayload, err := HelloAdmissionPayload(relayHello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayHelloJSON, err := json.Marshal(relayHello)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := vectorFile{
 		Note:     "Generated by remote/internal/protocol (go test -update). Consumed by HermesKit E2EETests. Do not edit by hand.",
 		Identity: vecIdentity{Seed: hex.EncodeToString(bridge.Seed()), Public: hex.EncodeToString(bridge.Public()), SessionID: bridge.SessionID()},
@@ -366,6 +491,11 @@ func TestGoldenVectors(t *testing.T) {
 			ConfirmPlain: string(confirmPlain), ConfirmFrame: hex.EncodeToString(confirm),
 			PhoneSigLabel: labelSigPhone, BridgeSigLabel: labelSigBridge, TranscriptLabel: labelTranscript,
 			KeysLabel: labelKeys, PairProofLabel: labelPairProof,
+		},
+		RelayHello: vecRelayHello{
+			Timestamp: relayTimestamp, HelloJSON: string(relayHelloJSON), Payload: hex.EncodeToString(relayPayload),
+			Signature: hex.EncodeToString(*relayHello.AdmissionSignature), CodeProof: hex.EncodeToString(*relayHello.AdmissionCodeProof),
+			PhoneLabel: labelHelloAdmissionPhone, CodeLabel: labelHelloAdmissionCode,
 		},
 		Envelopes: envs,
 		ChunkSplit: vecChunk{Threshold: ChunkThreshold, Sizes: []int{ChunkThreshold, ChunkThreshold + 1, 2*ChunkThreshold + 5},

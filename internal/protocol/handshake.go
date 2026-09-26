@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -17,11 +18,110 @@ const NonceSize = 32
 
 // Hello is the phone's opening message (plaintext JSON text frame).
 type Hello struct {
-	Version   int    `json:"v"`
-	SessionID string `json:"s"`
-	PhoneID   Bytes  `json:"pid"` // phone Ed25519 public key
-	PhoneEph  Bytes  `json:"pe"`  // phone X25519 ephemeral public key
-	NonceP    Bytes  `json:"np"`
+	Version            int    `json:"v"`
+	SessionID          string `json:"s"`
+	PhoneID            Bytes  `json:"pid"` // phone Ed25519 public key
+	PhoneEph           Bytes  `json:"pe"`  // phone X25519 ephemeral public key
+	NonceP             Bytes  `json:"np"`
+	AdmissionTimestamp *int64 `json:"ats,omitempty"`
+	AdmissionSignature *Bytes `json:"asig,omitempty"`
+	AdmissionCodeProof *Bytes `json:"ap,omitempty"`
+}
+
+// UnmarshalJSON distinguishes absent relay-only proof fields from explicit
+// nulls and rejects extensions whose shape could otherwise be mistaken for a
+// legacy Hello.
+func (h *Hello) UnmarshalJSON(data []byte) error {
+	type wireHello Hello
+	var decoded wireHello
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, hasTimestamp := fields["ats"]
+	_, hasSignature := fields["asig"]
+	_, hasCodeProof := fields["ap"]
+	if hasTimestamp != hasSignature || (hasCodeProof && (!hasTimestamp || !hasSignature)) {
+		return errors.New("protocol: incomplete hello admission proof")
+	}
+	for _, key := range []string{"ats", "asig", "ap"} {
+		if raw, ok := fields[key]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("protocol: null hello admission proof field")
+		}
+	}
+	if hasSignature && (decoded.AdmissionSignature == nil || len(*decoded.AdmissionSignature) != ed25519.SignatureSize) {
+		return errors.New("protocol: malformed hello admission signature")
+	}
+	if hasCodeProof && (decoded.AdmissionCodeProof == nil || len(*decoded.AdmissionCodeProof) != sha256.Size) {
+		return errors.New("protocol: malformed hello admission code proof")
+	}
+	*h = Hello(decoded)
+	return nil
+}
+
+// HelloAdmissionPayload encodes the relay-only signed fields using the same
+// length-prefix format as the handshake transcript.
+func HelloAdmissionPayload(h Hello) ([]byte, error) {
+	if h.AdmissionTimestamp == nil || h.AdmissionSignature == nil {
+		return nil, errors.New("protocol: hello admission proof is absent")
+	}
+	var timestamp [8]byte
+	binary.BigEndian.PutUint64(timestamp[:], uint64(*h.AdmissionTimestamp))
+	payload := make([]byte, 0, 2*6+1+len(h.SessionID)+len(h.PhoneID)+len(h.PhoneEph)+len(h.NonceP)+len(timestamp))
+	payload = append(payload, lp([]byte{byte(h.Version)})...)
+	payload = append(payload, lp([]byte(h.SessionID))...)
+	payload = append(payload, lp(h.PhoneID)...)
+	payload = append(payload, lp(h.PhoneEph)...)
+	payload = append(payload, lp(h.NonceP)...)
+	payload = append(payload, lp(timestamp[:])...)
+	return payload, nil
+}
+
+// AddHelloAdmissionProof adds the phone's relay-only proof. code is nil for a
+// trusted phone that does not need first-pairing authority.
+func (i *Identity) AddHelloAdmissionProof(h *Hello, timestamp int64, code []byte) error {
+	if h == nil {
+		return errors.New("protocol: nil hello")
+	}
+	h.AdmissionTimestamp = &timestamp
+	h.AdmissionSignature = nil
+	h.AdmissionCodeProof = nil
+	payload, err := HelloAdmissionPayload(Hello{Version: h.Version, SessionID: h.SessionID, PhoneID: h.PhoneID, PhoneEph: h.PhoneEph, NonceP: h.NonceP, AdmissionTimestamp: h.AdmissionTimestamp, AdmissionSignature: new(Bytes)})
+	if err != nil {
+		return err
+	}
+	sig := Bytes(i.sign(labelHelloAdmissionPhone, payload))
+	h.AdmissionSignature = &sig
+	if code != nil {
+		proof := Bytes(helloAdmissionCodeProof(code, payload))
+		h.AdmissionCodeProof = &proof
+	}
+	return nil
+}
+
+// VerifyHelloAdmissionSignature checks the proof against the device key in Hello.
+func VerifyHelloAdmissionSignature(h Hello) bool {
+	payload, err := HelloAdmissionPayload(h)
+	return err == nil && h.AdmissionSignature != nil && verify(h.PhoneID, labelHelloAdmissionPhone, payload, *h.AdmissionSignature)
+}
+
+// VerifyHelloAdmissionCode checks the first-pairing proof without consuming a code.
+func VerifyHelloAdmissionCode(h Hello, code []byte) bool {
+	if h.AdmissionCodeProof == nil || len(*h.AdmissionCodeProof) != sha256.Size {
+		return false
+	}
+	payload, err := HelloAdmissionPayload(h)
+	return err == nil && hmac.Equal(helloAdmissionCodeProof(code, payload), *h.AdmissionCodeProof)
+}
+
+func helloAdmissionCodeProof(code, payload []byte) []byte {
+	mac := hmac.New(sha256.New, code)
+	mac.Write([]byte(labelHelloAdmissionCode))
+	mac.Write(payload)
+	return mac.Sum(nil)
 }
 
 // Accept is the bridge's reply (plaintext JSON text frame).

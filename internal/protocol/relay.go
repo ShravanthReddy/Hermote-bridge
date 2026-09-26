@@ -17,7 +17,8 @@ import (
 //	bridge → relay  text  {"t":"attach","s":<session id>,"k":<bridge pub>,"sig":<Ed25519(labelRelayAttach ‖ nonce)>}
 //	relay → bridge  text  {"t":"attached"}            (or a close with RelayCloseBadAttach)
 //	then binary frames only:  channel(2, big-endian) ‖ kind(1) ‖ payload
-//	  channel 0 is control (JSON payload): {"t":"open","c":N} / {"t":"close","c":N,"reason":…}
+//	  channel 0 is control (JSON payload): {"t":"open","c":N,"token":"…"} /
+//	  {"t":"vouch","c":N,"token":"…"} / {"t":"close","c":N,"reason":…}
 //	  channels ≥1 carry one phone each; kind 0 = the phone's text frame, 1 = binary frame.
 //
 // Phone ⇄ relay: plain WebSocket to /v1/phone?s=<session id>; frames pass
@@ -65,8 +66,9 @@ type RelayAttach struct {
 
 // RelayControl is a channel-0 message.
 type RelayControl struct {
-	T      string `json:"t"` // "open" | "close"
+	T      string `json:"t"` // "open" | "vouch" | "close"
 	C      uint16 `json:"c"`
+	Token  string `json:"token,omitempty"`
 	Reason string `json:"reason,omitempty"`
 }
 

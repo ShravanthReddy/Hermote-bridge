@@ -31,6 +31,15 @@
     "KeysLabel": "hermes-remote v1 keys",
     "PairProofLabel": "hermes-remote v1 pair"
   },
+  "relayHello": {
+    "Timestamp": 1800000123,
+    "HelloJSON": "{\"v\":1,\"s\":\"KvKmYTS1-YEqRZjpT-RKca\",\"pid\":\"9jT2Q9diaTKps6Zn2tkGrnkoT_lBK3WZJTBzjjHWZE8\",\"pe\":\"gUwQa2bvUay-NITJKKRFRPbQYcpwIzx_F5bsqOlTxho\",\"np\":\"gEZ4xpmKDDObqTEMpFCbjmVMhWk3DzTsrqsL0OkFgBc\",\"ats\":1800000123,\"asig\":\"4I6VScrGECTU4gtWTQrLQTM6s17YHj79WC9JfQtPz2sjLge3OTXKEK_HUh3TecRFS9sPjXftcognahHw72h5DA\",\"ap\":\"Kmo1ZbZdtUq3rC12ChE0zHt6Q9AL-qQIh0vE0j-6KBM\"}",
+    "Payload": "00010100164b764b6d595453312d594571525a6a70542d524b63610020f634f643d7626932a9b3a667dad906ae79284ff9412b75992530738e31d6644f0020814c106b66ef51acbe3484c928a44544f6d061ca70233c7f1796eca8e953c61a0020804678c6998a0c339ba9310ca4509b8e654c8569370f34ecaeab0bd0e90580170008000000006b49d27b",
+    "Signature": "e08e9549cac61024d4e20b564d0acb41333ab35ed81e3efd582f497d0b4fcf6b232e07b73935ca10afc7521dd379c4454bdb0f8d77ed7288276a11f0ef68790c",
+    "CodeProof": "2a6a3565b65db54ab7ac2d760a1134cc7b7a43d00bfaa408874bc4d23fba2813",
+    "PhoneLabel": "hermes-remote v1 hello admission phone",
+    "CodeLabel": "hermes-remote v1 hello admission code"
+  },
   "envelopes": [
     {
       "direction": "p2b",
