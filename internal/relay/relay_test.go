@@ -43,12 +43,18 @@ type fakeBridge struct {
 	ws *websocket.Conn
 	id *protocol.Identity
 
-	openSig  chan uint16
-	closeSig chan uint16
+	openSig      chan uint16
+	closeSig     chan uint16
+	closeNotices chan relayCloseNotice
 
 	openMu     sync.Mutex
 	sendMu     sync.Mutex
 	openTokens map[uint16]string
+}
+
+type relayCloseNotice struct {
+	ch    uint16
+	token string
 }
 
 func newFakeBridge(t *testing.T, ctx context.Context, relayHTTPURL string) *fakeBridge {
@@ -100,12 +106,13 @@ func newFakeBridgeWithIdentity(t *testing.T, ctx context.Context, relayHTTPURL s
 	}
 
 	fb := &fakeBridge{
-		t:          t,
-		ws:         ws,
-		id:         id,
-		openSig:    make(chan uint16, 64),
-		closeSig:   make(chan uint16, 64),
-		openTokens: make(map[uint16]string),
+		t:            t,
+		ws:           ws,
+		id:           id,
+		openSig:      make(chan uint16, 64),
+		closeSig:     make(chan uint16, 64),
+		closeNotices: make(chan relayCloseNotice, 64),
+		openTokens:   make(map[uint16]string),
 	}
 	go fb.readLoop()
 	t.Cleanup(func() { ws.Close(websocket.StatusNormalClosure, "") })
@@ -143,7 +150,22 @@ func (fb *fakeBridge) readLoop() {
 			case fb.closeSig <- c.C:
 			default:
 			}
+			select {
+			case fb.closeNotices <- relayCloseNotice{ch: c.C, token: c.Token}:
+			default:
+			}
 		}
+	}
+}
+
+func (fb *fakeBridge) nextCloseNotice(timeout time.Duration) relayCloseNotice {
+	fb.t.Helper()
+	select {
+	case notice := <-fb.closeNotices:
+		return notice
+	case <-time.After(timeout):
+		fb.t.Fatalf("timed out waiting for a close notice")
+		return relayCloseNotice{}
 	}
 }
 
@@ -632,8 +654,8 @@ func TestVouchIgnoresStaleCloseAndReusedChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForClose(t, ctx, oldPhone, websocket.StatusNormalClosure, 2*time.Second)
-	if closed := fb.nextClose(2 * time.Second); closed != ch {
-		t.Fatalf("close control channel %d, want %d", closed, ch)
+	if notice := fb.nextCloseNotice(2 * time.Second); notice.ch != ch || notice.token != oldToken {
+		t.Fatalf("close notice = %+v, want channel %d and token %q", notice, ch, oldToken)
 	}
 
 	sess := rly.sessions[fb.id.SessionID()]

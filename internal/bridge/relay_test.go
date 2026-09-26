@@ -286,6 +286,74 @@ func TestRelayChannelCloseRequiresCurrentOwnershipAndCarriesToken(t *testing.T) 
 	}
 }
 
+func TestRemoteClosedIgnoresDelayedCloseFromReusedChannel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type acceptedSocket struct{ ws *websocket.Conn }
+	accepted := make(chan acceptedSocket, 1)
+	harness := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err == nil {
+			accepted <- acceptedSocket{ws: ws}
+		}
+	}))
+	t.Cleanup(harness.Close)
+	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(harness.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(websocket.StatusNormalClosure, "") })
+	server := receiveTestValue(t, ctx, accepted, "relay socket").ws
+	t.Cleanup(func() { _ = server.Close(websocket.StatusNormalClosure, "") })
+
+	const channel uint16 = 9
+	mux := newRelayMux(client)
+	_ = mux.open(channel, "old-token")
+	current := mux.open(channel, "new-token")
+
+	if err := current.vouch(ctx); err != nil {
+		t.Fatalf("vouch current channel: %v", err)
+	}
+	_, frame, err := server.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, payload, err := protocol.ParseRelayFrame(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vouch protocol.RelayControl
+	if err := json.Unmarshal(payload, &vouch); err != nil || vouch.T != "vouch" || vouch.C != channel || vouch.Token != "new-token" {
+		t.Fatalf("vouch = %+v (%v)", vouch, err)
+	}
+
+	// This is the old relay->bridge close, held until after the channel was
+	// reused and the new incarnation vouched.
+	mux.remoteClosed(channel, "old-token")
+	mux.deliver(channel, protocol.RelayKindText, []byte("still-open"))
+	if got := readRelayChannel(t, ctx, current); string(got) != "still-open" {
+		t.Fatalf("current channel received %q, want still-open", got)
+	}
+
+	mux.mu.Lock()
+	owned := mux.channels[channel] == current
+	mux.mu.Unlock()
+	if !owned {
+		t.Fatal("delayed close removed the reused current channel")
+	}
+}
+
+func readRelayChannel(t *testing.T, ctx context.Context, rc *relayChannel) []byte {
+	t.Helper()
+	readCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, payload, err := rc.Read(readCtx)
+	if err != nil {
+		t.Fatalf("read relay channel: %v", err)
+	}
+	return payload
+}
+
 func TestVouchPrecedesAccept(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

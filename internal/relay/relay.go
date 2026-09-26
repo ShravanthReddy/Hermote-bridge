@@ -658,7 +658,7 @@ func (s *Server) servePhone(w http.ResponseWriter, r *http.Request) {
 			delete(sess.phones, p.ch)
 		}
 		sess.mu.Unlock()
-		_ = sess.control(context.Background(), protocol.RelayControl{T: "close", C: p.ch})
+		_ = sess.control(context.Background(), protocol.RelayControl{T: "close", C: p.ch, Token: p.token})
 	}()
 
 	timer := time.AfterFunc(s.Limits.AdmissionTimeout, func() {

@@ -151,7 +151,7 @@ func (d *RelayDialer) runOnce(ctx context.Context) error {
 				rc := mux.open(c.C, c.Token)
 				go d.Server.serveLink(ctx, rc, fmt.Sprintf("relay:%d", c.C))
 			case "close":
-				mux.remoteClosed(c.C)
+				mux.remoteClosed(c.C, c.Token)
 			}
 			continue
 		}
@@ -260,14 +260,18 @@ func (m *relayMux) deliver(ch uint16, kind byte, payload []byte) {
 	}
 }
 
-func (m *relayMux) remoteClosed(ch uint16) {
+// remoteClosed applies a close only to the channel incarnation named by its
+// token. A missing token preserves compatibility with older relays.
+func (m *relayMux) remoteClosed(ch uint16, token string) {
 	m.mu.Lock()
 	rc := m.channels[ch]
+	if rc == nil || (token != "" && rc.token != token) {
+		m.mu.Unlock()
+		return
+	}
 	delete(m.channels, ch)
 	m.mu.Unlock()
-	if rc != nil {
-		rc.finish()
-	}
+	rc.finish()
 }
 
 func (m *relayMux) closeAll() {
