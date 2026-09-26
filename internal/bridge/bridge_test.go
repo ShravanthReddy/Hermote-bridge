@@ -367,6 +367,201 @@ func TestPairThenTunnel(t *testing.T) {
 	}
 }
 
+func helloWithAdmissionProof(t *testing.T, phone *protocol.Identity, sessionID string, timestamp int64, code []byte) protocol.Hello {
+	t.Helper()
+	hello, _, err := protocol.PhoneHello(phone, sessionID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := phone.AddHelloAdmissionProof(&hello, timestamp, code); err != nil {
+		t.Fatal(err)
+	}
+	return hello
+}
+
+func TestHelloAdmissionProofAndCodeWithoutConsume(t *testing.T) {
+	srv, _ := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), code)
+	if !srv.authorizeHelloVouch(hello) {
+		t.Fatal("valid outstanding code proof did not authorize a vouch")
+	}
+	if srv.Pairings.Pending() != 1 {
+		t.Fatal("Hello proof consumed the first-pairing code")
+	}
+}
+
+func TestHelloProofSkewSkipsVouchButConfirms(t *testing.T) {
+	srv, hs := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix()+60, code)
+	if !srv.authorizeHelloVouch(boundary) {
+		t.Fatal("proof at the positive 60-second boundary did not authorize a vouch")
+	}
+	for _, offset := range []int64{-61, 61} {
+		hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix()+offset, code)
+		if srv.authorizeHelloVouch(hello) {
+			t.Fatalf("timestamp offset %d seconds authorized a vouch", offset)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(client, ctx) {
+		t.Fatalf("legacy Confirm path did not succeed after a skewed proof: %v", err)
+	}
+}
+
+func TestExpiredConsumedCodeAndRevocationSkipVouch(t *testing.T) {
+	srv, _ := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	consumed, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.Pairings.Consume(consumed) {
+		t.Fatal("test code was not consumed")
+	}
+	srv.Pairings.mu.Lock()
+	srv.Pairings.codes[string(expired)] = time.Now().Add(-time.Second)
+	srv.Pairings.mu.Unlock()
+	for _, code := range [][]byte{consumed, expired} {
+		hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), code)
+		if srv.authorizeHelloVouch(hello) {
+			t.Fatal("expired or consumed pairing code authorized a vouch")
+		}
+	}
+	if err := srv.Store.AddTrusted(phone.Public(), ""); err != nil {
+		t.Fatal(err)
+	}
+	trusted := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), nil)
+	if !srv.authorizeHelloVouch(trusted) {
+		t.Fatal("currently trusted key did not authorize a vouch")
+	}
+	if _, err := srv.Revoke(protocol.DeviceID(phone.Public())[:6]); err != nil {
+		t.Fatal(err)
+	}
+	revoked := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), nil)
+	if srv.authorizeHelloVouch(revoked) {
+		t.Fatal("revoked key authorized a vouch")
+	}
+}
+
+func TestInvalidHelloFloodDoesNotExhaustReplayCache(t *testing.T) {
+	srv, _ := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < helloReplayCapacity+1; i++ {
+		hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), code)
+		bad := *hello.AdmissionSignature
+		bad[0] ^= 0x80
+		hello.AdmissionSignature = &bad
+		if srv.authorizeHelloVouch(hello) {
+			t.Fatal("invalid proof authorized a vouch")
+		}
+	}
+	if got := len(srv.helloReplay); got != 0 {
+		t.Fatalf("invalid-proof flood inserted %d replay entries", got)
+	}
+}
+
+func TestInvalidProofOrUntrustedKeySkipsVouchButConfirms(t *testing.T) {
+	srv, hs := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), code)
+	bad := *hello.AdmissionSignature
+	bad[0] ^= 0xff
+	hello.AdmissionSignature = &bad
+	if srv.authorizeHelloVouch(hello) {
+		t.Fatal("invalid signature authorized a vouch")
+	}
+	untrusted := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), nil)
+	if srv.authorizeHelloVouch(untrusted) {
+		t.Fatal("unknown key without code authorized a vouch")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(client, ctx) {
+		t.Fatalf("old Confirm path did not succeed: %v", err)
+	}
+}
+
+func TestHelloReplayAndConcurrentDuplicate(t *testing.T) {
+	srv, _ := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), code)
+	const contenders = 24
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if srv.authorizeHelloVouch(hello) {
+				accepted.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("concurrent duplicate vouch decisions = %d, want 1", got)
+	}
+	if srv.authorizeHelloVouch(hello) {
+		t.Fatal("replayed Hello proof authorized a second vouch")
+	}
+}
+
+func TestHelloReplayCacheFullSkipsVouchButConfirms(t *testing.T) {
+	srv, hs := newTestServer(t)
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := helloWithAdmissionProof(t, phone, srv.Identity.SessionID(), time.Now().Unix(), code)
+	srv.helloReplayMu.Lock()
+	for i := 0; i < helloReplayCapacity; i++ {
+		srv.helloReplay[string([]byte{byte(i >> 8), byte(i)})] = time.Now().Add(time.Minute)
+	}
+	srv.helloReplayMu.Unlock()
+	if srv.authorizeHelloVouch(hello) {
+		t.Fatal("full replay cache authorized a vouch")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(client, ctx) {
+		t.Fatalf("Confirm path failed when replay cache was full: %v", err)
+	}
+}
+
 func TestOnePairingCodeAdmitsExactlyOneConcurrentPhone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

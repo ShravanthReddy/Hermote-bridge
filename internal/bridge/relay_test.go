@@ -222,3 +222,201 @@ func TestRelayKeepaliveFrameIsAnIgnorableControlMessage(t *testing.T) {
 		t.Fatalf("keepalive %v must fire at least three times per relay idle timeout %v", relayKeepalive, idleTimeout)
 	}
 }
+
+func TestVouchPrecedesAccept(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type acceptedSocket struct {
+		ws *websocket.Conn
+	}
+	accepted := make(chan acceptedSocket, 1)
+	harness := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err == nil {
+			accepted <- acceptedSocket{ws: ws}
+		}
+	}))
+	t.Cleanup(harness.Close)
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(harness.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ws.Close(websocket.StatusNormalClosure, "") })
+	serverSocket := receiveTestValue(t, ctx, accepted, "legacy relay socket").ws
+	t.Cleanup(func() { _ = serverSocket.Close(websocket.StatusNormalClosure, "") })
+
+	const channel uint16 = 17
+	const token = "AAECAwQFBgcICQoLDA0ODw"
+	mux := newRelayMux(ws)
+	phoneLink := &orderedVouchTestLink{mux: mux, channel: channel, token: token, inbox: make(chan relayMsg, 4)}
+	phone, _ := protocol.NewIdentity(nil)
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello, phoneState, err := protocol.PhoneHello(phone, srv.Identity.SessionID(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := phone.AddHelloAdmissionProof(&hello, time.Now().Unix(), code); err != nil {
+		t.Fatal(err)
+	}
+	helloJSON, _ := json.Marshal(hello)
+	phoneLink.inbox <- relayMsg{typ: websocket.MessageText, data: helloJSON}
+	conn := srv.newConnection(phoneLink, "relay:17")
+	handshake := make(chan error, 1)
+	go func() { handshake <- conn.handshake(ctx) }()
+
+	readRelayFrame := func() (uint16, byte, []byte) {
+		t.Helper()
+		_, frame, err := serverSocket.Read(ctx)
+		if err != nil {
+			t.Fatalf("read relay frame: %v", err)
+		}
+		channel, kind, payload, err := protocol.ParseRelayFrame(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return channel, kind, payload
+	}
+	controlChannel, controlKind, controlPayload := readRelayFrame()
+	var control protocol.RelayControl
+	if err := json.Unmarshal(controlPayload, &control); err != nil || controlChannel != 0 || controlKind != protocol.RelayKindText || control.T != "vouch" || control.Token != token {
+		t.Fatalf("first bridge frame was not the matching vouch: channel=%d kind=%d control=%+v err=%v", controlChannel, controlKind, control, err)
+	}
+	acceptChannel, acceptKind, acceptRaw := readRelayFrame()
+	if acceptChannel != channel || acceptKind != protocol.RelayKindText {
+		t.Fatalf("second bridge frame was not Accept on channel %d: channel=%d kind=%d", channel, acceptChannel, acceptKind)
+	}
+	var accept protocol.Accept
+	if err := json.Unmarshal(acceptRaw, &accept); err != nil {
+		t.Fatal(err)
+	}
+	confirm, _, err := phoneState.Finish(accept, srv.Identity.Public(), code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phoneLink.inbox <- relayMsg{typ: websocket.MessageBinary, data: confirm}
+	if err := receiveTestValue(t, ctx, handshake, "bridge handshake"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type orderedVouchTestLink struct {
+	mux     *relayMux
+	channel uint16
+	token   string
+	inbox   chan relayMsg
+}
+
+func (l *orderedVouchTestLink) Read(ctx context.Context) (websocket.MessageType, []byte, error) {
+	select {
+	case msg := <-l.inbox:
+		return msg.typ, msg.data, nil
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	}
+}
+
+func (l *orderedVouchTestLink) Write(ctx context.Context, typ websocket.MessageType, payload []byte) error {
+	kind := protocol.RelayKindBinary
+	if typ == websocket.MessageText {
+		kind = protocol.RelayKindText
+	}
+	return l.mux.write(ctx, protocol.RelayFrame(l.channel, kind, payload))
+}
+
+func (l *orderedVouchTestLink) Close(code websocket.StatusCode, reason string) error {
+	return l.mux.ws.Close(code, reason)
+}
+
+func (l *orderedVouchTestLink) hasVouchToken() bool { return l.token != "" }
+
+func (l *orderedVouchTestLink) vouch(ctx context.Context) error {
+	raw, err := json.Marshal(protocol.RelayControl{T: "vouch", C: l.channel, Token: l.token})
+	if err != nil {
+		return err
+	}
+	return l.mux.write(ctx, protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
+}
+
+type rawFrameLegacyRelayHarness struct{}
+
+func (rawFrameLegacyRelayHarness) stripOpenToken(frame []byte) []byte {
+	channel, kind, payload, err := protocol.ParseRelayFrame(frame)
+	if err != nil || channel != protocol.RelayControlChannel || kind != protocol.RelayKindText {
+		return frame
+	}
+	var control protocol.RelayControl
+	if json.Unmarshal(payload, &control) != nil || control.T != "open" {
+		return frame
+	}
+	control.Token = ""
+	forwarded, _ := json.Marshal(control)
+	return protocol.RelayFrame(channel, kind, forwarded)
+}
+
+func (rawFrameLegacyRelayHarness) ignoresVouch(frame []byte) bool {
+	channel, kind, payload, err := protocol.ParseRelayFrame(frame)
+	if err != nil || channel != protocol.RelayControlChannel || kind != protocol.RelayKindText {
+		return false
+	}
+	var control struct {
+		T string `json:"t"`
+	}
+	return json.Unmarshal(payload, &control) == nil && control.T == "vouch"
+}
+
+func TestRelayOldPeerCompatibility(t *testing.T) {
+	srv, hs := newTestServer(t)
+	harness := rawFrameLegacyRelayHarness{}
+	open, _ := json.Marshal(protocol.RelayControl{T: "open", C: 9, Token: "AAECAwQFBgcICQoLDA0ODw"})
+	openFrame := protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, open)
+	legacyFrame := harness.stripOpenToken(openFrame)
+	_, _, legacyOpen, _ := protocol.ParseRelayFrame(legacyFrame)
+	var got protocol.RelayControl
+	if err := json.Unmarshal(legacyOpen, &got); err != nil || got.Token != "" {
+		t.Fatalf("legacy relay did not remove the open token: %+v %v", got, err)
+	}
+	vouch, _ := json.Marshal(protocol.RelayControl{T: "vouch", C: 9, Token: "AAECAwQFBgcICQoLDA0ODw"})
+	if !harness.ignoresVouch(protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, vouch)) {
+		t.Fatal("legacy relay did not ignore the additive vouch control")
+	}
+	var oldBridge struct {
+		T string `json:"t"`
+		C uint16 `json:"c"`
+	}
+	if err := json.Unmarshal(open, &oldBridge); err != nil || oldBridge.T != "open" || oldBridge.C != 9 {
+		t.Fatalf("legacy bridge rejected open with extra token: %+v %v", oldBridge, err)
+	}
+	newPhone, _ := protocol.NewIdentity(nil)
+	newHello := helloWithAdmissionProof(t, newPhone, "AAAAAAAAAAAAAAAAAAAAAA", time.Now().Unix(), nil)
+	newHelloJSON, _ := json.Marshal(newHello)
+	var oldHello struct {
+		Version int    `json:"v"`
+		Session string `json:"s"`
+	}
+	if err := json.Unmarshal(newHelloJSON, &oldHello); err != nil || oldHello.Version != protocol.Version {
+		t.Fatalf("legacy bridge rejected additive Hello fields: %+v %v", oldHello, err)
+	}
+	phone, _ := protocol.NewIdentity(nil)
+	legacyHello, _, err := protocol.PhoneHello(phone, srv.Identity.SessionID(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(legacyHello)
+	if err != nil || strings.Contains(string(raw), `"ats"`) || strings.Contains(string(raw), `"asig"`) || strings.Contains(string(raw), `"ap"`) {
+		t.Fatalf("legacy phone Hello changed: %s (%v)", raw, err)
+	}
+	code, _, err := srv.Pairings.Issue(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := connectPhone(t, ctx, hs, srv.Identity, phone, code)
+	if err != nil || !admissionAccepted(client, ctx) {
+		t.Fatalf("legacy phone could not complete the old Confirm handshake: %v", err)
+	}
+}

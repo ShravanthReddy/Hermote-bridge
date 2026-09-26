@@ -27,6 +27,7 @@ const (
 	idleTimeout                 = 100 * time.Second
 	maxFrame                    = protocol.MaxPlaintext + 64
 	maxAdmissionPublishAttempts = 3
+	helloReplayCapacity         = 4096
 )
 
 // admissionTestHooks are installed before a test starts serving. Production
@@ -58,6 +59,8 @@ type Server struct {
 	mu                   sync.Mutex
 	conns                map[*conn]struct{}
 	revocationGeneration uint64
+	helloReplayMu        sync.Mutex
+	helloReplay          map[string]time.Time
 	testHooks            *admissionTestHooks
 }
 
@@ -73,16 +76,17 @@ func newServer(
 		logger = slog.Default()
 	}
 	srv := &Server{
-		Identity:   id,
-		Store:      st,
-		Gateway:    gw,
-		Logger:     logger,
-		Pairings:   newPairings(),
-		httpClient: &http.Client{Timeout: 60 * time.Second},
-		deps:       deps,
-		httpSlots:  newWorkPool(deps.httpProcessWide),
-		fsSlots:    newWorkPool(deps.fsProcessWide),
-		conns:      map[*conn]struct{}{},
+		Identity:    id,
+		Store:       st,
+		Gateway:     gw,
+		Logger:      logger,
+		Pairings:    newPairings(),
+		httpClient:  &http.Client{Timeout: 60 * time.Second},
+		deps:        deps,
+		httpSlots:   newWorkPool(deps.httpProcessWide),
+		fsSlots:     newWorkPool(deps.fsProcessWide),
+		conns:       map[*conn]struct{}{},
+		helloReplay: map[string]time.Time{},
 	}
 	srv.folders = newFolderLister(deps, logger, srv.fsSlots)
 	spoolRoot := deps.blobSpoolRoot
@@ -310,6 +314,14 @@ func (c *conn) handshake(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if relayLink, ok := c.ws.(interface {
+		hasVouchToken() bool
+		vouch(context.Context) error
+	}); ok && relayLink.hasVouchToken() && c.srv.authorizeHelloVouch(hello) {
+		// This shares relayMux's serialized write gate with Accept and every
+		// other channel write, so the relay observes vouch before Accept.
+		_ = relayLink.vouch(hctx)
+	}
 	acceptJSON, _ := json.Marshal(accept)
 	if err := c.ws.Write(hctx, websocket.MessageText, acceptJSON); err != nil {
 		return err
@@ -366,6 +378,54 @@ func (c *conn) handshake(ctx context.Context) error {
 		c.srv.Logger.Info("new phone paired", "device", short(protocol.DeviceID(pending.PhoneID())))
 	}
 	return nil
+}
+
+func (s *Server) authorizeHelloVouch(hello protocol.Hello) bool {
+	if hello.AdmissionTimestamp == nil || hello.AdmissionSignature == nil {
+		return false
+	}
+	if !protocol.VerifyHelloAdmissionSignature(hello) {
+		return false
+	}
+	now := time.Now()
+	stamp := *hello.AdmissionTimestamp
+	nowUnix := now.Unix()
+	if stamp < nowUnix-60 || stamp > nowUnix+60 {
+		return false
+	}
+	trusted := s.Store != nil && s.Store.IsTrusted(hello.PhoneID)
+	if !trusted {
+		for _, code := range s.Pairings.Outstanding() {
+			if protocol.VerifyHelloAdmissionCode(hello, code) {
+				trusted = true
+			}
+		}
+	}
+	if !trusted {
+		return false
+	}
+	return s.rememberHello(hello)
+}
+
+func (s *Server) rememberHello(hello protocol.Hello) bool {
+	key := string(hello.PhoneID) + string(hello.NonceP)
+	s.helloReplayMu.Lock()
+	defer s.helloReplayMu.Unlock()
+	now := time.Now()
+	for k, deadline := range s.helloReplay {
+		if !now.Before(deadline) {
+			delete(s.helloReplay, k)
+		}
+	}
+	if _, exists := s.helloReplay[key]; exists || len(s.helloReplay) >= helloReplayCapacity {
+		return false
+	}
+	remaining := (*hello.AdmissionTimestamp + 60 - now.Unix()) * int64(time.Second)
+	if remaining < 0 {
+		remaining = 0
+	}
+	s.helloReplay[key] = now.Add(time.Duration(remaining))
+	return true
 }
 
 func (s *Server) admissionGeneration() uint64 {

@@ -148,7 +148,7 @@ func (d *RelayDialer) runOnce(ctx context.Context) error {
 			}
 			switch c.T {
 			case "open":
-				rc := mux.open(c.C)
+				rc := mux.open(c.C, c.Token)
 				go d.Server.serveLink(ctx, rc, fmt.Sprintf("relay:%d", c.C))
 			case "close":
 				mux.remoteClosed(c.C)
@@ -229,8 +229,8 @@ func (m *relayMux) write(ctx context.Context, frame []byte) error {
 	return m.ws.Write(wctx, websocket.MessageBinary, frame)
 }
 
-func (m *relayMux) open(ch uint16) *relayChannel {
-	rc := &relayChannel{mux: m, ch: ch, inbox: make(chan relayMsg, 256), done: make(chan struct{})}
+func (m *relayMux) open(ch uint16, token string) *relayChannel {
+	rc := &relayChannel{mux: m, ch: ch, token: token, inbox: make(chan relayMsg, 256), done: make(chan struct{})}
 	m.mu.Lock()
 	if old := m.channels[ch]; old != nil {
 		old.finish()
@@ -283,9 +283,23 @@ func (m *relayMux) closeAll() {
 type relayChannel struct {
 	mux   *relayMux
 	ch    uint16
+	token string
 	inbox chan relayMsg
 	done  chan struct{}
 	once  sync.Once
+}
+
+func (rc *relayChannel) hasVouchToken() bool { return rc.token != "" }
+
+func (rc *relayChannel) vouch(ctx context.Context) error {
+	if rc.token == "" {
+		return errors.New("relay channel has no vouch token")
+	}
+	raw, err := json.Marshal(protocol.RelayControl{T: "vouch", C: rc.ch, Token: rc.token})
+	if err != nil {
+		return err
+	}
+	return rc.mux.write(ctx, protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
 }
 
 func (rc *relayChannel) finish() { rc.once.Do(func() { close(rc.done) }) }
