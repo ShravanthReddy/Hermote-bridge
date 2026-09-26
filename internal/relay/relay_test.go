@@ -186,12 +186,15 @@ func (fb *fakeBridge) sendFrame(ch uint16, payload []byte) error {
 	return fb.ws.Write(ctx, websocket.MessageBinary, protocol.RelayFrame(ch, protocol.RelayKindBinary, payload))
 }
 
-// sendClose pushes a control "close" for a channel, exactly as the real
-// bridge does when a per-channel handshake ends.
+// sendClose pushes a legacy tokenless control close for a channel.
 func (fb *fakeBridge) sendClose(ch uint16, reason string) error {
+	return fb.sendCloseToken(ch, "", reason)
+}
+
+func (fb *fakeBridge) sendCloseToken(ch uint16, token, reason string) error {
 	fb.sendMu.Lock()
 	defer fb.sendMu.Unlock()
-	raw, _ := json.Marshal(protocol.RelayControl{T: "close", C: ch, Reason: reason})
+	raw, _ := json.Marshal(protocol.RelayControl{T: "close", C: ch, Token: token, Reason: reason})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return fb.ws.Write(ctx, websocket.MessageBinary, protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
@@ -646,21 +649,21 @@ func TestVouchIgnoresStaleCloseAndReusedChannel(t *testing.T) {
 	if currentToken == oldToken {
 		t.Fatal("reused channel retained its previous token")
 	}
-	if err := fb.sendVouch(currentCh, oldToken); err != nil {
+	if err := fb.sendVouch(currentCh, currentToken); err != nil {
 		t.Fatal(err)
 	}
-	if err := fb.sendFrame(currentCh, []byte("stale-token-barrier")); err != nil {
+	if err := fb.sendFrame(currentCh, []byte("vouch-barrier")); err != nil {
 		t.Fatal(err)
 	}
 	readData(t, ctx, current, 2*time.Second)
-
-	newcomer := mustDialPhone(t, ctx, rs.URL, fb.id.SessionID(), "10.0.0.1")
-	_ = fb.nextOpen(2 * time.Second)
-	waitForClose(t, ctx, current, protocol.RelayCloseFull, 2*time.Second)
-	if closed := fb.nextClose(2 * time.Second); closed != currentCh {
-		t.Fatalf("closed channel %d, want unvouched channel %d", closed, currentCh)
+	if err := fb.sendCloseToken(currentCh, oldToken, "delayed close from old incarnation"); err != nil {
+		t.Fatal(err)
 	}
-	_ = newcomer
+	assertStillOpen(t, ctx, fb, currentCh, current)
+	if err := fb.sendClose(currentCh, "legacy close"); err != nil {
+		t.Fatal(err)
+	}
+	waitForClose(t, ctx, current, websocket.StatusNormalClosure, 2*time.Second)
 }
 
 func TestVouchAfterFirstBridgeFrameIsIgnored(t *testing.T) {

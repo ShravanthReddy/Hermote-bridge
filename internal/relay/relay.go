@@ -474,7 +474,7 @@ func (s *Server) serveBridge(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(payload, &c) == nil {
 				switch c.T {
 				case "close":
-					sess.closePhone(c.C, websocket.StatusNormalClosure, c.Reason)
+					sess.closePhoneFromBridge(c.C, c.Token, c.Reason)
 				case "vouch":
 					s.vouch(sess, c)
 				}
@@ -533,6 +533,20 @@ func (sess *session) closePhone(ch uint16, code websocket.StatusCode, reason str
 	if p != nil {
 		p.shutdown(code, reason)
 	}
+}
+
+// closePhoneFromBridge applies a close only to the socket incarnation named by
+// its token. A missing token preserves compatibility with older bridges.
+func (sess *session) closePhoneFromBridge(ch uint16, token, reason string) {
+	sess.mu.Lock()
+	p := sess.phones[ch]
+	if p == nil || (token != "" && p.token != token) {
+		sess.mu.Unlock()
+		return
+	}
+	delete(sess.phones, ch)
+	sess.mu.Unlock()
+	p.shutdown(websocket.StatusNormalClosure, reason)
 }
 
 // closeIfPending closes p only if it is still the phone occupying its

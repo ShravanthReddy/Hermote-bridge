@@ -232,11 +232,12 @@ func (m *relayMux) write(ctx context.Context, frame []byte) error {
 func (m *relayMux) open(ch uint16, token string) *relayChannel {
 	rc := &relayChannel{mux: m, ch: ch, token: token, inbox: make(chan relayMsg, 256), done: make(chan struct{})}
 	m.mu.Lock()
-	if old := m.channels[ch]; old != nil {
-		old.finish()
-	}
+	old := m.channels[ch]
 	m.channels[ch] = rc
 	m.mu.Unlock()
+	if old != nil {
+		old.finish()
+	}
 	return rc
 }
 
@@ -344,12 +345,15 @@ func (rc *relayChannel) Close(_ websocket.StatusCode, reason string) error {
 	rc.once.Do(func() {
 		close(rc.done)
 		rc.mux.mu.Lock()
-		if rc.mux.channels[rc.ch] == rc {
+		owned := rc.mux.channels[rc.ch] == rc
+		if owned {
 			delete(rc.mux.channels, rc.ch)
 		}
 		rc.mux.mu.Unlock()
-		raw, _ := json.Marshal(protocol.RelayControl{T: "close", C: rc.ch, Reason: reason})
-		err = rc.mux.write(context.Background(), protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
+		if owned {
+			raw, _ := json.Marshal(protocol.RelayControl{T: "close", C: rc.ch, Token: rc.token, Reason: reason})
+			err = rc.mux.write(context.Background(), protocol.RelayFrame(protocol.RelayControlChannel, protocol.RelayKindText, raw))
+		}
 	})
 	return err
 }

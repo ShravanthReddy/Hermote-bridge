@@ -223,6 +223,69 @@ func TestRelayKeepaliveFrameIsAnIgnorableControlMessage(t *testing.T) {
 	}
 }
 
+func TestRelayChannelCloseRequiresCurrentOwnershipAndCarriesToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type acceptedSocket struct{ ws *websocket.Conn }
+	accepted := make(chan acceptedSocket, 1)
+	harness := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err == nil {
+			accepted <- acceptedSocket{ws: ws}
+		}
+	}))
+	t.Cleanup(harness.Close)
+	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(harness.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(websocket.StatusNormalClosure, "") })
+	server := receiveTestValue(t, ctx, accepted, "relay socket").ws
+	t.Cleanup(func() { _ = server.Close(websocket.StatusNormalClosure, "") })
+
+	mux := newRelayMux(client)
+	old := mux.open(9, "old-token")
+	current := &relayChannel{mux: mux, ch: 9, token: "current-token", inbox: make(chan relayMsg, 4), done: make(chan struct{})}
+	mux.mu.Lock()
+	mux.channels[9] = current
+	mux.mu.Unlock()
+	if err := old.Close(websocket.StatusNormalClosure, "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Close(websocket.StatusNormalClosure, "current"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, frame, err := server.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel, kind, payload, err := protocol.ParseRelayFrame(frame)
+	if err != nil || channel != protocol.RelayControlChannel || kind != protocol.RelayKindText {
+		t.Fatalf("close frame = channel %d kind %d (%v)", channel, kind, err)
+	}
+	var control protocol.RelayControl
+	if err := json.Unmarshal(payload, &control); err != nil || control.T != "close" || control.C != 9 || control.Token != "current-token" {
+		t.Fatalf("close control = %+v (%v)", control, err)
+	}
+	legacy := mux.open(10, "")
+	if err := legacy.Close(websocket.StatusNormalClosure, "legacy relay"); err != nil {
+		t.Fatal(err)
+	}
+	_, frame, err = server.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel, kind, payload, err = protocol.ParseRelayFrame(frame)
+	if err != nil || channel != protocol.RelayControlChannel || kind != protocol.RelayKindText {
+		t.Fatalf("legacy close frame = channel %d kind %d (%v)", channel, kind, err)
+	}
+	control = protocol.RelayControl{}
+	if err := json.Unmarshal(payload, &control); err != nil || control.T != "close" || control.C != 10 || control.Token != "" {
+		t.Fatalf("legacy close control = %+v (%v)", control, err)
+	}
+}
+
 func TestVouchPrecedesAccept(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
