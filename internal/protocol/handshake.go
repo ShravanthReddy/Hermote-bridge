@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 )
 
 // NonceSize is the size of each side's handshake nonce.
@@ -40,6 +41,13 @@ func (h *Hello) UnmarshalJSON(data []byte) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
+	}
+	for key := range fields {
+		for _, proofKey := range []string{"ats", "asig", "ap"} {
+			if strings.EqualFold(key, proofKey) && key != proofKey {
+				return errors.New("protocol: non-canonical hello admission proof field")
+			}
+		}
 	}
 	_, hasTimestamp := fields["ats"]
 	_, hasSignature := fields["asig"]
