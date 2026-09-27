@@ -1,0 +1,41 @@
+{
+  "api": 1,
+  "version": "0.15.0",
+  "incarnation": "5f0c6a9e2b7d4c1a8e3f9b6d2a7c4e10",
+  "started_at": "2026-09-27T10:00:00Z",
+  "platform": {
+    "os": "darwin",
+    "arch": "arm64"
+  },
+  "transport": "relay",
+  "relay": {
+    "url": "wss://relay.hermote.app",
+    "attached": true
+  },
+  "install": {
+    "method": "manual",
+    "path": "/Users/x/.local/bin/hermote-bridge"
+  },
+  "service": {
+    "manager": "launchd",
+    "label": "ai.hermes.remote"
+  },
+  "gateway": {
+    "state": "ready",
+    "since": "2026-09-27T10:00:05Z",
+    "last_probe_ok_at": "2026-09-27T10:15:00Z",
+    "restarts": 1,
+    "last_restart_reason": "unresponsive"
+  },
+  "devices": {
+    "paired": 2,
+    "connected": 1
+  },
+  "update": {
+    "can_apply": false,
+    "unavailable": "not_supported",
+    "update_command": "curl -fsSL https://raw.githubusercontent.com/ShravanthReddy/Hermote-bridge/main/install.sh | HERMOTE_BRIDGE_INSTALL_DIR='/Users/x/.local/bin' bash",
+    "current": null,
+    "last": null
+  }
+}

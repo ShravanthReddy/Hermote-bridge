@@ -20,21 +20,25 @@ import (
 
 // Status is what `hermote-bridge status` shows.
 type Status struct {
-	LaunchID    string            `json:"launch_id,omitempty"`
-	SessionID   string            `json:"session_id"`
-	Transport   string            `json:"transport"`
-	Name        string            `json:"name"`
-	Gateway     string            `json:"gateway"` // starting | ready | down
-	GatewayPort int               `json:"gateway_port"`
-	BridgeAddr  string            `json:"bridge_addr"`
-	PublicURL   string            `json:"public_url,omitempty"`
-	Connections int               `json:"connections"`
-	Pending     int               `json:"pending_pairings"`
-	Devices     []state.Device    `json:"devices"`
-	StartedAt   time.Time         `json:"started_at"`
-	Version     string            `json:"version"`
-	Warnings    []string          `json:"warnings,omitempty"`
-	Extra       map[string]string `json:"extra,omitempty"`
+	LaunchID    string         `json:"launch_id,omitempty"`
+	SessionID   string         `json:"session_id"`
+	Transport   string         `json:"transport"`
+	Name        string         `json:"name"`
+	Gateway     string         `json:"gateway"` // starting | ready | down
+	GatewayPort int            `json:"gateway_port"`
+	BridgeAddr  string         `json:"bridge_addr"`
+	PublicURL   string         `json:"public_url,omitempty"`
+	Connections int            `json:"connections"`
+	Pending     int            `json:"pending_pairings"`
+	Devices     []state.Device `json:"devices"`
+	StartedAt   time.Time      `json:"started_at"`
+	Version     string         `json:"version"`
+	// Incarnation and ExecutableSHA256 identify this daemon process and the
+	// file it started from (docs/specs/bridge-status-updates.md D7 step 1).
+	Incarnation      string            `json:"incarnation,omitempty"`
+	ExecutableSHA256 string            `json:"executable_sha256,omitempty"`
+	Warnings         []string          `json:"warnings,omitempty"`
+	Extra            map[string]string `json:"extra,omitempty"`
 }
 
 // PairResult is the answer to a pair request.

@@ -55,6 +55,9 @@ type Server struct {
 	// OnPush receives a phone's push registration (device token, wanted
 	// kinds); nil when push is not wired.
 	OnPush func(deviceID string, reg protocol.PushRegistration)
+	// Status answers the bridge-local routes and the bridge capability; nil
+	// serves neither, as a bridge that predates them. Set before serving.
+	Status StatusProvider
 
 	mu                   sync.Mutex
 	conns                map[*conn]struct{}
@@ -279,6 +282,10 @@ func (c *conn) run(ctx context.Context) {
 			MaxFileBytes: c.srv.deps.blobMaxFileBytes,
 			ChunkBytes:   c.srv.deps.blobChunkBytes,
 		}
+	}
+	if c.srv.Status != nil {
+		bridgeCapability := c.srv.Status.BridgeCapability()
+		capabilities.Bridge = &bridgeCapability
 	}
 	if err := c.sendJSON(ctx, protocol.CtlMessage{
 		Ch:   protocol.ChCtl,

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,6 +60,12 @@ type Supervisor struct {
 	state    State
 	port     int
 	watchers []chan State
+	// since, lastProbeOK, restarts and lastRestart are Health's record,
+	// kept under mu with the state they describe.
+	since       time.Time
+	lastProbeOK time.Time
+	restarts    int
+	lastRestart RestartReason
 
 	stop chan struct{}
 	done chan struct{}
@@ -66,6 +73,72 @@ type Supervisor struct {
 
 	// probeFn answers "does the child on this port still serve us"; tests swap it.
 	probeFn func(ctx context.Context, port int) error
+	// restartBackoff is the first wait before a restart; tests shorten it.
+	restartBackoff time.Duration
+}
+
+// RestartReason says why the supervisor restarted the child
+// (docs/specs/bridge-status-updates.md §3, gateway.last_restart_reason).
+type RestartReason string
+
+const (
+	// RestartExited: a ready child exited on its own.
+	RestartExited RestartReason = "exited"
+	// RestartUnresponsive: the probe watch ended a child that stopped answering.
+	RestartUnresponsive RestartReason = "unresponsive"
+	// RestartStartFailed: the child could not start, or never became ready.
+	RestartStartFailed RestartReason = "start_failed"
+)
+
+// Health is the child's state and history for bridge status. Restart counts
+// cover this bridge process only; zero times mean "not yet".
+type Health struct {
+	State State
+	// Since is when State last changed.
+	Since time.Time
+	// LastProbeOK is the last time a token probe succeeded.
+	LastProbeOK       time.Time
+	Restarts          int
+	LastRestartReason RestartReason
+}
+
+// Health returns the child's current state and restart history.
+func (s *Supervisor) Health() Health {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return Health{
+		State: s.state, Since: s.since, LastProbeOK: s.lastProbeOK,
+		Restarts: s.restarts, LastRestartReason: s.lastRestart,
+	}
+}
+
+// ProbeNow runs the token probe against the current child now, bounded by
+// ctx. Unlike State, it does not trust the cached "ready": a child can stop
+// answering for up to ProbeInterval × ProbeFailures before the watch ends it.
+func (s *Supervisor) ProbeNow(ctx context.Context) error {
+	port, ready := s.Port()
+	if !ready {
+		return errors.New("gateway: not ready")
+	}
+	return s.probeAndRecord(ctx, port)
+}
+
+// probeAndRecord runs probeFn and records a success for Health.
+func (s *Supervisor) probeAndRecord(ctx context.Context, port int) error {
+	if err := s.probeFn(ctx, port); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.lastProbeOK = time.Now().UTC()
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Supervisor) recordRestart(reason RestartReason) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restarts++
+	s.lastRestart = reason
 }
 
 var readyRe = regexp.MustCompile(`HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)`)
@@ -98,10 +171,12 @@ func New(opts Options) (*Supervisor, error) {
 		opts:  opts,
 		token: hex.EncodeToString(tok),
 		state: StateDown,
+		since: time.Now().UTC(),
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
 	}
 	s.probeFn = s.probe
+	s.restartBackoff = time.Second
 	return s, nil
 }
 
@@ -154,6 +229,9 @@ func (s *Supervisor) Unwatch(ch <-chan State) {
 
 func (s *Supervisor) setState(st State, port int) {
 	s.mu.Lock()
+	if st != s.state {
+		s.since = time.Now().UTC()
+	}
 	s.state, s.port = st, port
 	watchers := append([]chan State(nil), s.watchers...)
 	s.mu.Unlock()
@@ -169,19 +247,20 @@ func (s *Supervisor) setState(st State, port int) {
 // is called. The child is terminated on exit.
 func (s *Supervisor) Run(ctx context.Context) error {
 	defer close(s.done)
-	backoff := time.Second
+	backoff := s.restartBackoff
 	for {
 		started := time.Now()
-		err := s.runOnce(ctx)
+		reason, err := s.runOnce(ctx)
 		if ctx.Err() != nil || s.stopped() {
 			return nil
 		}
 		if err != nil {
-			s.opts.Logger.Warn("gateway child exited", "err", err)
+			s.opts.Logger.Warn("gateway child exited", "err", err, "reason", reason)
 		}
+		s.recordRestart(reason)
 		s.setState(StateDown, 0)
 		if time.Since(started) > time.Minute {
-			backoff = time.Second
+			backoff = s.restartBackoff
 		}
 		s.opts.Logger.Info("restarting gateway child", "in", backoff)
 		select {
@@ -231,7 +310,8 @@ func (s *Supervisor) stopped() bool {
 	}
 }
 
-func (s *Supervisor) runOnce(ctx context.Context) error {
+// runOnce runs one child until it ends and says why it ended.
+func (s *Supervisor) runOnce(ctx context.Context) (RestartReason, error) {
 	s.setState(StateStarting, 0)
 	cmd := exec.CommandContext(ctx, s.opts.Python, "-m", "hermes_cli.main", "serve",
 		"--host", "127.0.0.1", "--port", "0", "--skip-build")
@@ -250,14 +330,14 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return RestartStartFailed, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return err
+		return RestartStartFailed, err
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("gateway: start: %w", err)
+		return RestartStartFailed, fmt.Errorf("gateway: start: %w", err)
 	}
 	s.mu.Lock()
 	s.cmd = cmd
@@ -273,32 +353,37 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 
 	select {
 	case port := <-portCh:
-		if err := s.probe(ctx, port); err != nil {
+		if err := s.probeAndRecord(ctx, port); err != nil {
 			s.opts.Logger.Warn("gateway probe failed", "err", err)
 			_ = cmd.Process.Kill()
-			return <-waitErr
+			return RestartStartFailed, <-waitErr
 		}
 		s.setState(StateReady, port)
 		s.opts.Logger.Info("gateway ready", "port", port)
 		exited := make(chan struct{})
+		var unresponsive atomic.Bool
 		go func() {
 			if s.watch(ctx, port, exited) {
 				s.opts.Logger.Warn("gateway child unresponsive; ending it", "port", port)
+				unresponsive.Store(true)
 				_ = cmd.Process.Kill()
 			}
 		}()
 		err := <-waitErr
 		close(exited)
-		return err
+		if unresponsive.Load() {
+			return RestartUnresponsive, err
+		}
+		return RestartExited, err
 	case err := <-waitErr:
-		return fmt.Errorf("gateway: exited before ready: %w", err)
+		return RestartStartFailed, fmt.Errorf("gateway: exited before ready: %w", err)
 	case <-time.After(s.opts.StartTimeout):
 		_ = cmd.Process.Kill()
 		<-waitErr
-		return errors.New("gateway: readiness sentinel not seen in time")
+		return RestartStartFailed, errors.New("gateway: readiness sentinel not seen in time")
 	case <-s.stop:
 		_ = cmd.Process.Signal(os.Interrupt)
-		return <-waitErr
+		return RestartExited, <-waitErr
 	}
 }
 
@@ -319,7 +404,7 @@ func (s *Supervisor) watch(ctx context.Context, port int, exited <-chan struct{}
 		case <-ticker.C:
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, s.opts.ProbeInterval)
-		err := s.probeFn(probeCtx, port)
+		err := s.probeAndRecord(probeCtx, port)
 		cancel()
 		if err == nil {
 			failures = 0

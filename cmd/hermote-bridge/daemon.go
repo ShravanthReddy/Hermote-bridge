@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -18,10 +19,12 @@ import (
 	"github.com/ShravanthReddy/Hermote-bridge/internal/bridge"
 	"github.com/ShravanthReddy/Hermote-bridge/internal/control"
 	"github.com/ShravanthReddy/Hermote-bridge/internal/gateway"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/launchd"
 	"github.com/ShravanthReddy/Hermote-bridge/internal/protocol"
 	"github.com/ShravanthReddy/Hermote-bridge/internal/push"
 	"github.com/ShravanthReddy/Hermote-bridge/internal/state"
 	"github.com/ShravanthReddy/Hermote-bridge/internal/tailscale"
+	"github.com/ShravanthReddy/Hermote-bridge/internal/update"
 )
 
 // daemon is the long-running process launchd keeps alive: gateway supervisor,
@@ -37,6 +40,7 @@ type daemon struct {
 	log       *slog.Logger
 	startedAt time.Time
 	launchID  string
+	identity  *update.Identity
 
 	mu        sync.Mutex
 	publicURL string
@@ -51,6 +55,13 @@ func runDaemon(args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
 	slog.SetDefault(log)
+	// Captured before anything is served: later checks compare with this
+	// digest, never with whatever the path holds by then (D7 step 1).
+	identity, err := update.CaptureIdentity()
+	if err != nil {
+		return err
+	}
+	defer identity.Close()
 
 	store, err := state.Open()
 	if err != nil {
@@ -75,8 +86,12 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
-	d := &daemon{store: store, id: id, cfg: cfg, sup: sup, log: log, startedAt: time.Now().UTC(), launchID: *launchID}
+	d := &daemon{
+		store: store, id: id, cfg: cfg, sup: sup, log: log, startedAt: time.Now().UTC(), launchID: *launchID,
+		identity: identity,
+	}
 	d.srv = bridge.New(id, store, sup, log)
+	d.srv.Status = d
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -231,6 +246,9 @@ func (d *daemon) Status(ctx context.Context) control.Status {
 		Devices:     devices,
 		StartedAt:   d.startedAt,
 		Version:     version,
+
+		Incarnation:      d.identity.Incarnation,
+		ExecutableSHA256: d.identity.SHA256,
 	}
 	if u, err := d.PublicURL(ctx); err == nil {
 		s.PublicURL = u
@@ -282,4 +300,42 @@ func (d *daemon) Revoke(_ context.Context, idOrPrefix string) (state.Device, err
 		}
 	}
 	return dev, nil
+}
+
+// BridgeCapability implements bridge.StatusProvider.
+func (d *daemon) BridgeCapability() protocol.BridgeCapability {
+	return bridge.NewBridgeCapability(version, d.identity.Incarnation)
+}
+
+// BridgeStatus implements bridge.StatusProvider: GET /bridge/v1/status.
+func (d *daemon) BridgeStatus(context.Context) bridge.BridgeStatus {
+	devices, _ := d.store.Devices()
+	facts := bridge.StatusFacts{
+		Version: version, Incarnation: d.identity.Incarnation, StartedAt: d.startedAt,
+		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Transport: d.cfg.Transport,
+		Install: d.install(), Gateway: d.sup.Health(),
+		Paired: len(devices), Connected: d.srv.ConnectionCount(),
+	}
+	if d.relay != nil {
+		facts.RelayURL = d.cfg.RelayURL
+		facts.RelayAttached, _ = d.relay.Attached()
+	}
+	if d.launchID != "" {
+		facts.ServiceLabel = launchd.Label
+	}
+	return bridge.NewBridgeStatus(facts)
+}
+
+// install classifies this bridge's installation from the running executable
+// and the LaunchAgent on disk, read on every request so a re-run `up` shows.
+func (d *daemon) install() update.Install {
+	env := update.Environment{Version: version, GOOS: runtime.GOOS, UID: os.Getuid(), Managed: d.launchID != ""}
+	if runtime.GOOS == "darwin" {
+		if path, err := launchd.PlistPath(); err == nil {
+			if content, err := os.ReadFile(path); err == nil {
+				env.ServiceExecutable, _ = launchd.ProgramExecutable(content)
+			}
+		}
+	}
+	return update.DetectInstall(d.identity, env)
 }

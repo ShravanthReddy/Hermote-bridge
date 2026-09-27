@@ -121,6 +121,11 @@ type serviceSnapshot struct {
 	pid     int
 }
 
+// ProgramExecutable returns ProgramArguments[0] from a LaunchAgent plist:
+// the file the service runs, which bridge status compares with the running
+// executable (docs/specs/bridge-status-updates.md D6).
+func ProgramExecutable(content []byte) (string, error) { return programExecutable(content) }
+
 // programExecutable returns ProgramArguments[0] from a launchd plist. The
 // decoder handles the XML escaping used by plist(), including binary paths
 // containing '&' or '<'.

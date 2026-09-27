@@ -95,6 +95,24 @@ type CtlMessage struct {
 // control message. They are intentionally absent from the signed handshake.
 type Capabilities struct {
 	AttachmentBlob *AttachmentBlobCapability `json:"attachment_blob,omitempty"`
+	Bridge         *BridgeCapability         `json:"bridge,omitempty"`
+}
+
+// BridgeCapability says which bridge-local routes (/bridge/v1/) this bridge
+// serves (docs/specs/bridge-status-updates.md §3). Within API 1 fields are
+// only added; phones read a higher API as 1 and a missing one as a legacy
+// bridge.
+type BridgeCapability struct {
+	API         int            `json:"api"`
+	Version     string         `json:"version"`
+	Incarnation string         `json:"incarnation"`
+	Features    BridgeFeatures `json:"features"`
+}
+
+// BridgeFeatures are the bridge-local features this process serves.
+type BridgeFeatures struct {
+	Status bool `json:"status"`
+	Update bool `json:"update"`
 }
 
 // AttachmentBlobCapability is version 1 of the bounded upload channel.

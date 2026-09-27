@@ -98,6 +98,9 @@ func (c *conn) startProxyHTTP(ctx context.Context, req protocol.HTTPRequest, fai
 			responseBody("malformed bridge request", "invalid query"), fail,
 		)
 	}
+	if c.srv.Status != nil && isBridgeRoute(path.Path) {
+		return c.startBridgeRoute(ctx, req, path, fail)
+	}
 	if !routeAllowed(req.Method, path.Path) {
 		return c.replyHTTP(ctx, req.ID, http.StatusForbidden, json.RawMessage(RefusedRouteError), fail)
 	}
