@@ -1,0 +1,15 @@
+{
+  "current": "0.15.0",
+  "latest": null,
+  "update_available": null,
+  "checked_at": null,
+  "verified": false,
+  "release": null,
+  "can_apply": false,
+  "unavailable": "not_supported",
+  "update_command": "curl -fsSL https://raw.githubusercontent.com/ShravanthReddy/Hermote-bridge/main/install.sh | HERMOTE_BRIDGE_INSTALL_DIR='/Users/x/.local/bin' bash",
+  "error": {
+    "kind": "network",
+    "message": "DNS lookup for api.github.com failed — check your connection or proxy."
+  }
+}

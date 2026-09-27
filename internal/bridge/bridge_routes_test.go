@@ -357,3 +357,73 @@ func checkGolden(t *testing.T, name string, body json.RawMessage) {
 			name, want, indented.Bytes())
 	}
 }
+
+// checkingProvider also answers the update check with a fixed result and
+// records every force flag it was asked with.
+type checkingProvider struct {
+	statusProvider
+	result update.Result
+	forced chan bool
+}
+
+func (p checkingProvider) CheckForUpdate(_ context.Context, force bool) update.CheckResponse {
+	p.forced <- force
+	return p.result.Response(p.facts.Install)
+}
+
+func checking(result update.Result) (func(*Server) StatusProvider, chan bool) {
+	forced := make(chan bool, 16)
+	return func(*Server) StatusProvider {
+		return checkingProvider{statusProvider: statusProvider{facts: goldenFacts()}, result: result, forced: forced}
+	}, forced
+}
+
+func TestCheckGolden(t *testing.T) {
+	provide, _ := checking(update.Result{
+		Current: "0.15.0", CheckedAt: time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC),
+		Latest: &update.LatestRelease{
+			Version: "0.16.0", Tag: "v0.16.0", PublishedAt: time.Date(2026, 9, 28, 8, 0, 0, 0, time.UTC),
+			Notes: []string{"Serve bridge status to paired phones"}, More: 0,
+		},
+	})
+	srv, hs, bridgeHits := statusTestServer(t, provide)
+	ctx := testContext(t)
+	p, _ := trustedPhone(t, ctx, srv, hs)
+	resp := bridgeCall(t, ctx, p, 1, http.MethodGet, "/bridge/v1/update/check", "")
+	if resp.Status != http.StatusOK || bridgeHits.Load() != 0 {
+		t.Fatalf("check %d %s (gateway saw %d)", resp.Status, resp.Body, bridgeHits.Load())
+	}
+	checkGolden(t, "bridge-update-check-v1.json", resp.Body)
+}
+
+func TestFirstFailedCheckGolden(t *testing.T) {
+	provide, _ := checking(update.Result{
+		Current: "0.15.0",
+		Err: &update.CheckError{
+			Kind: update.ErrorNetwork, Message: "DNS lookup for api.github.com failed — check your connection or proxy.",
+		},
+	})
+	srv, hs, _ := statusTestServer(t, provide)
+	ctx := testContext(t)
+	p, _ := trustedPhone(t, ctx, srv, hs)
+	resp := bridgeCall(t, ctx, p, 1, http.MethodGet, "/bridge/v1/update/check", "force=true")
+	checkGolden(t, "bridge-update-check-cold-failure-v1.json", resp.Body)
+}
+
+func TestUpdateCheckForcesOnlyOnLiteralQuery(t *testing.T) {
+	provide, forced := checking(update.Result{Current: "0.15.0"})
+	srv, hs, _ := statusTestServer(t, provide)
+	ctx := testContext(t)
+	p, _ := trustedPhone(t, ctx, srv, hs)
+	for i, tc := range []struct {
+		query string
+		force bool
+	}{{"force=true", true}, {"", false}, {"force=1", false}, {"force=true&x=1", false}, {"force=TRUE", false}} {
+		if resp := bridgeCall(t, ctx, p, uint64(i+1), http.MethodGet, "/bridge/v1/update/check", tc.query); resp.Status != http.StatusOK {
+			t.Fatalf("?%s = %d %s", tc.query, resp.Status, resp.Body)
+		}
+		if got := <-forced; got != tc.force {
+			t.Fatalf("?%s forced=%v, want %v", tc.query, got, tc.force)
+		}
+	}
+}

@@ -35,6 +35,12 @@ type StatusProvider interface {
 	BridgeStatus(ctx context.Context) BridgeStatus
 }
 
+// UpdateChecker is implemented by a StatusProvider that also checks for
+// releases (GET /bridge/v1/update/check). The phone's only input is force.
+type UpdateChecker interface {
+	CheckForUpdate(ctx context.Context, force bool) update.CheckResponse
+}
+
 // NewBridgeCapability is the capability a Phase 1 bridge advertises in
 // `ctl accepted`: status served, no update engine.
 func NewBridgeCapability(version, incarnation string) protocol.BridgeCapability {
@@ -177,7 +183,8 @@ type bridgeHandler func(ctx context.Context, provider StatusProvider, query stri
 
 // bridgeRoutes is the exact method and path table; nothing is matched by prefix.
 var bridgeRoutes = map[string]bridgeHandler{
-	http.MethodGet + " /bridge/v1/status": serveBridgeStatus,
+	http.MethodGet + " /bridge/v1/status":       serveBridgeStatus,
+	http.MethodGet + " /bridge/v1/update/check": serveUpdateCheck,
 }
 
 func isBridgeRoute(path string) bool { return strings.HasPrefix(path, bridgeRoutePrefix) }
@@ -211,6 +218,15 @@ func (c *conn) startBridgeRoute(
 
 func serveBridgeStatus(ctx context.Context, provider StatusProvider, _ string) (int, json.RawMessage) {
 	return bridgeReply(provider.BridgeStatus(ctx))
+}
+
+// serveUpdateCheck forces a check only for the literal query "force=true".
+func serveUpdateCheck(ctx context.Context, provider StatusProvider, query string) (int, json.RawMessage) {
+	checker, ok := provider.(UpdateChecker)
+	if !ok {
+		return http.StatusNotFound, json.RawMessage(UnknownBridgeRouteError)
+	}
+	return bridgeReply(checker.CheckForUpdate(ctx, query == "force=true"))
 }
 
 // bridgeReply encodes a 200 body without HTML escaping, so a command such as

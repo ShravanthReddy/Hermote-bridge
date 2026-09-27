@@ -41,6 +41,7 @@ type daemon struct {
 	startedAt time.Time
 	launchID  string
 	identity  *update.Identity
+	checker   *update.Checker
 
 	mu        sync.Mutex
 	publicURL string
@@ -88,7 +89,7 @@ func runDaemon(args []string) error {
 	}
 	d := &daemon{
 		store: store, id: id, cfg: cfg, sup: sup, log: log, startedAt: time.Now().UTC(), launchID: *launchID,
-		identity: identity,
+		identity: identity, checker: update.NewChecker(update.NewGitHub(), version),
 	}
 	d.srv = bridge.New(id, store, sup, log)
 	d.srv.Status = d
@@ -338,4 +339,9 @@ func (d *daemon) install() update.Install {
 		}
 	}
 	return update.DetectInstall(d.identity, env)
+}
+
+// CheckForUpdate implements bridge.UpdateChecker: GET /bridge/v1/update/check.
+func (d *daemon) CheckForUpdate(ctx context.Context, force bool) update.CheckResponse {
+	return d.checker.Check(ctx, force).Response(d.install())
 }
